@@ -47,7 +47,8 @@ const T = {
   // Pulls (px/s toward filter, scaled by pulse envelope):
   playerPull: n => Math.min(170, 100 + 10 * n),       // < player speed 215, but x1.5 near the core => dash out
   bugPull: n => Math.min(45, 18 + 3 * n),             // gentle nudge, ~15% of the old pull on bugs
-  clumpPull: n => Math.min(90, 50 + 5 * n),           // debris drifts in and gets eaten, so it recycles
+  // SCATTER: a pulse does NOT eat dust/webs. It blasts them around (swirl + random impulses, wall bounces) and they settle at new random spots.
+  scatter: { v0: 280, v1: 640, swirl: 130, jitter: 520, fricPulse: 1.1, fricAfter: 4.5, settleV: 14, spawnKeep: 48, spawnX: 0, spawnY: 230, bounce: 0.55 },
   bugAvoid: 130,                                      // non-Roach bugs steer away from the zone (px/s at the edge of the core)
   mothPickup: 34,                                     // px: player within this of an unbonded Moth recruits it
   protect: 4,                                         // seconds of spawn protection from the filter (no pull, can't be eaten)
@@ -195,7 +196,7 @@ function makeBug(type, x, y) {
 }
 function addClump(a, r) {
   const rad = rnd(13, 22);
-  G.clumps.push({ x: CX + Math.cos(a) * r, y: CY + Math.sin(a) * r, r: rad, seed: rnd(100), spawn: 0.6 });
+  G.clumps.push({ x: CX + Math.cos(a) * r, y: CY + Math.sin(a) * r, r: rad, seed: rnd(100), spawn: 0.6, dirt: true, vx: 0, vy: 0, mv: false, trail: [] });
 }
 
 // ---------- fx ----------
@@ -295,12 +296,69 @@ function planSpawns() {
 function startPulse() {
   G.pulseN++; G.pulseT = 0; G.pulseDur = T.pullDur(G.pulseN); G.warned = false;
   G.nextPulseAt = G.t + T.interval(G.pulseN); G.trickleT = Math.max(G.trickleT, 2.5);
+  scatterBlast(); // shove existing dust + webs (count unchanged) before the wave's new clumps appear
   for (const s of G.spawnPlan) {
-    if (s.type === 'clump') { if (G.clumps.length >= T.maxClumps) continue; const c = { x: s.x, y: s.y, r: rnd(13, 22), seed: rnd(100), spawn: 0.6 }; G.clumps.push(c); }
+    if (s.type === 'clump') { if (G.clumps.length >= T.maxClumps) continue; const c = { x: s.x, y: s.y, r: rnd(13, 22), seed: rnd(100), spawn: 0.6, dirt: true, vx: 0, vy: 0, mv: false, trail: [] }; G.clumps.push(c); }
     else spawnBug(s.type, s.x, s.y);
   }
   G.spawnPlan = [];
   G.shake = 8; beep(80, 0.5, 'sawtooth', 0.08);
+}
+
+// ---------- scatter (pulse blast for dust clumps + webs) ----------
+// Both kinds are "debris": {x,y,r,vx,vy,mv(moving),trail}. Webs keep their strength; nothing is destroyed.
+function debris() { return G.clumps.concat(G.webs); }
+function scatterBlast() {
+  const S = T.scatter;
+  for (const o of debris()) {
+    if (o.spawn > 0 || o.dead) continue;
+    const dx = o.x - CX, dy = o.y - CY, d = hyp(dx, dy) || 1;
+    const out = Math.atan2(dy, dx), tan = out + (Math.random() < 0.5 ? 1 : -1) * Math.PI / 2;
+    const a = rnd(TAU) * 0.5 + (Math.random() < 0.5 ? out : tan) + rnd(-0.9, 0.9), v = rnd(S.v0, S.v1);
+    o.vx = Math.cos(a) * v; o.vy = Math.sin(a) * v; o.mv = true; o.trail = o.trail || [];
+    burst(o.x, o.y, o.dirt ? '#8d8678' : '#eadfff', 3, 70, 0.3);
+  }
+}
+function constrainDebris(o) {
+  const S = T.scatter;
+  let dx = o.x - CX, dy = o.y - CY, d = hyp(dx, dy) || 1;
+  const cr = o.dirt ? o.r : Math.min(o.r, 8), lim = R - cr - 2, minD = zoneR() + cr + 4; // webs are thin: only their centre needs to stay inside
+  if (d > lim) { o.x = CX + dx / d * lim; o.y = CY + dy / d * lim; const vr = (o.vx * dx + o.vy * dy) / d; if (vr > 0) { o.vx -= (1 + S.bounce) * vr * dx / d; o.vy -= (1 + S.bounce) * vr * dy / d; } }
+  else if (d < minD) { o.x = CX + dx / d * minD; o.y = CY + dy / d * minD; const vr = (o.vx * dx + o.vy * dy) / d; if (vr < 0) { o.vx -= (1 + S.bounce) * vr * dx / d; o.vy -= (1 + S.bounce) * vr * dy / d; } }
+  // keep off the player's spawn point
+  const sx = CX + S.spawnX, sy = CY + S.spawnY, kx = o.x - sx, ky = o.y - sy, kd = hyp(kx, ky), kr = S.spawnKeep + o.r;
+  if (o.mv && kd < kr) { const n = kd || 1; o.x = sx + (kd ? kx / n : 0) * kr; o.y = sy + (kd ? ky / n : 1) * kr; const vr = (o.vx * kx + o.vy * ky) / n; if (vr < 0) { o.vx -= (1 + S.bounce) * vr * kx / n; o.vy -= (1 + S.bounce) * vr * ky / n; } }
+}
+function updateDebris(dt) {
+  const S = T.scatter, env = pullEnv(), blast = G.pulseT >= 0;
+  const all = debris();
+  for (const o of all) {
+    if (o.spawn > 0) { o.spawn -= dt; continue; }
+    if (o.mv) {
+      if (blast) { // violent shake: swirl around the filter + random impulses
+        const dx = o.x - CX, dy = o.y - CY, d = hyp(dx, dy) || 1;
+        o.vx += (-dy / d * S.swirl * env + rnd(-1, 1) * S.jitter) * dt; o.vy += (dx / d * S.swirl * env + rnd(-1, 1) * S.jitter) * dt;
+      }
+      const f = Math.exp(-(blast ? S.fricPulse : S.fricAfter) * dt); o.vx *= f; o.vy *= f;
+      o.x += o.vx * dt; o.y += o.vy * dt;
+      o.trail.push([o.x, o.y]); if (o.trail.length > 7) o.trail.shift();
+    } else if (o.trail && o.trail.length) o.trail.shift();
+  }
+  // moving clumps push each other apart (so they don't all pile up); webs may overlap
+  for (let i = 0; i < G.clumps.length; i++) for (let j = i + 1; j < G.clumps.length; j++) {
+    const a = G.clumps[i], b = G.clumps[j]; if (!(a.mv || b.mv) || a.spawn > 0 || b.spawn > 0) continue;
+    const dx = b.x - a.x, dy = b.y - a.y, d = hyp(dx, dy), m = a.r + b.r;
+    if (d < m) { const n = d || 1, o2 = (m - d) / 2, ux = d ? dx / n : 1, uy = d ? dy / n : 0; a.x -= ux * o2; a.y -= uy * o2; b.x += ux * o2; b.y += uy * o2; }
+  }
+  for (const o of all) {
+    if (o.spawn > 0) continue;
+    constrainDebris(o); // also nudges anything overlapping the core out (never destroyed)
+    if (o.mv && !blast && hyp(o.vx, o.vy) < S.settleV) { // settled: dust puff
+      o.mv = false; o.vx = o.vy = 0;
+      if (o.dirt) { burst(o.x, o.y, '#8d8678', 9, 55, 0.6); G.rings.push({ x: o.x, y: o.y, r: o.r * 0.8, life: 0.4, dust: true }); }
+      else { burst(o.x, o.y, '#eadfff', 5, 45, 0.5); G.rings.push({ x: o.x, y: o.y, r: o.r * 0.7, life: 0.4, dust: true }); }
+    }
+  }
 }
 
 // ---------- bug AI ----------
@@ -419,7 +477,7 @@ function addWeb(x, y) {
     if (str(near) < T.webMaxStr) { near.strength = str(near) + 1; near.pulse = 0.4; G.rings.push({ x: near.x, y: near.y, r: near.r, life: 0.4, stack: true }); burst(near.x, near.y, '#cfe8ff', 3, 30, 0.3); }
     return;
   }
-  G.webs.push({ x, y, r: T.webR * rnd(0.9, 1.2), seed: rnd(100), dead: false, strength: 1, pulse: 0 });
+  G.webs.push({ x, y, r: T.webR * rnd(0.9, 1.2), seed: rnd(100), dead: false, strength: 1, pulse: 0, vx: 0, vy: 0, mv: false, trail: [] });
   if (G.webs.length > T.maxWebs) G.webs.shift(); // over the cap: the oldest web goes
 }
 function websAt(x, y) { const out = []; for (const w of G.webs) if (!w.dead && hyp(x - w.x, y - w.y) < w.r) out.push(w); return out; }
@@ -617,18 +675,8 @@ function step(dt) {
   for (const w of G.webs) if (w.pulse > 0) w.pulse = Math.max(0, w.pulse - dt);
   G.webs = G.webs.filter(w => !w.dead);
 
-  // clumps
-  for (const c of G.clumps) {
-    if (c.spawn > 0) { c.spawn -= dt; continue; }
-    const [px, py] = pullVec(c.x, c.y, T.clumpPull(G.pulseN), false); c.x += px * dt; c.y += py * dt;
-  }
-  // webs get swept toward the filter by the pulse like dust (weaker) and are consumed by it, so the pulse also clears the webs
-  if (pullEnv() > 0) for (const w of G.webs) {
-    const [px, py] = pullVec(w.x, w.y, T.clumpPull(G.pulseN) * 0.8, false); w.x += px * dt; w.y += py * dt;
-    if (hyp(w.x - CX, w.y - CY) < G.filterR + 2) { w.dead = true; burst(w.x, w.y, '#eadfff', 4, 60, 0.4); }
-  }
-  for (const c of G.clumps) if (hyp(c.x - CX, c.y - CY) < G.filterR + 2) { c.dead = true; burst(c.x, c.y, '#8d8678', 10, 80, 0.5); }
-  G.clumps = G.clumps.filter(c => !c.dead);
+  // dust + webs: the pulse scatters them (see scatterBlast / updateDebris); they are never pulled in or eaten
+  updateDebris(dt);
   // re-resolve collisions after clumps moved
   keepIn(p); for (const b of G.bugs) if (b.spawn <= 0) keepIn(b);
 
@@ -693,7 +741,14 @@ function drawStreaks() {
     ctx.beginPath(); ctx.moveTo(CX + c * s.r, CY + n * s.r); ctx.lineTo(CX + c * (s.r + len), CY + n * (s.r + len)); ctx.stroke();
   }
 }
+function drawTrail(o, col) { // motion trail while a clump / web is flying
+  const tr = o.trail; if (!tr || tr.length < 2 || !o.mv) return;
+  for (let i = 0; i < tr.length - 1; i++) { const k = (i + 1) / tr.length; ctx.globalAlpha = 0.28 * k; ctx.fillStyle = col; ctx.beginPath(); ctx.arc(tr[i][0], tr[i][1], o.r * (0.45 + 0.5 * k), 0, TAU); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  const sp = hyp(o.vx, o.vy); if (sp > 60) { ctx.strokeStyle = col; ctx.globalAlpha = 0.5; ctx.lineWidth = 2; ctx.beginPath(); for (let i = 0; i < 3; i++) { const off = (i - 1) * o.r * 0.5, nx = -o.vy / sp, ny = o.vx / sp; ctx.moveTo(o.x + nx * off, o.y + ny * off); ctx.lineTo(o.x + nx * off - o.vx / sp * (10 + sp * 0.04), o.y + ny * off - o.vy / sp * (10 + sp * 0.04)); } ctx.stroke(); ctx.globalAlpha = 1; }
+}
 function drawClump(c, t) {
+  drawTrail(c, '#9a9382');
   if (c.spawn > 0) ctx.globalAlpha = 0.4;
   ctx.fillStyle = '#6f695d'; ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, TAU); ctx.fill();
   ctx.fillStyle = '#8d8678';
@@ -703,6 +758,7 @@ function drawClump(c, t) {
 }
 function drawWebs(t) {
   for (const w of G.webs) { // unspent webs stay fully visible (no fade); more layers = denser, thicker, brighter
+    drawTrail(w, '#e6d8ff');
     const n = str(w), k = (n - 1) / Math.max(1, T.webMaxStr - 1), pu = w.pulse > 0 ? w.pulse : 0;
     ctx.fillStyle = `rgba(214,196,255,${0.20 + 0.14 * (n - 1) + pu * 0.4})`; ctx.beginPath(); ctx.arc(w.x, w.y, w.r + (n - 1) * 0.8, 0, TAU); ctx.fill();
     ctx.strokeStyle = `rgba(${238 - 40 * k | 0},${228 + 20 * k | 0},255,${Math.min(1, 0.62 + 0.13 * (n - 1))})`; ctx.lineWidth = 1 + 0.45 * (n - 1);
@@ -713,9 +769,9 @@ function drawWebs(t) {
     if (n >= 2) { ctx.fillStyle = 'rgba(255,255,255,0.95)'; ctx.font = 'bold 10px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.fillText('x' + n, w.x, w.y + 3.5); }
   }
   for (const r of G.rings) { // tear/stack/shield effect rings
-    const k = 1 - r.life / 0.4, c = r.shield ? '94,230,255' : r.stack ? '170,255,200' : '240,230,255';
+    const k = 1 - r.life / 0.4, c = r.shield ? '94,230,255' : r.stack ? '170,255,200' : r.dust ? '190,180,160' : '240,230,255';
     ctx.strokeStyle = `rgba(${c},${(r.shield ? 0.9 : 0.8) * Math.max(0, 1 - k)})`; ctx.lineWidth = r.shield ? 3 : 2;
-    ctx.beginPath(); ctx.arc(r.x, r.y, r.r * (1 + (r.shield ? 2.2 : r.stack ? 0.3 : 0.9) * k), 0, TAU); ctx.stroke();
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.r * (1 + (r.shield ? 2.2 : r.stack ? 0.3 : r.dust ? 1.4 : 0.9) * k), 0, TAU); ctx.stroke();
   }
 }
 function drawStingers(t) {
@@ -900,6 +956,7 @@ function drawLegend(y0) {
   ctx.fillStyle = zg; ctx.beginPath(); ctx.arc(CX - 250, y - 5, 11, 0, TAU); ctx.fill();
   ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 14px system-ui,sans-serif'; ctx.fillText('Filter', CX - 232, y);
   ctx.fillStyle = '#9fb0d8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText('orange DANGER ZONE: the dark core kills anything; it swells on a pulse.', CX - 150, y);
+  ctx.fillText('A pulse also BLASTS dust and webs around (they scatter, never vanish).', CX - 150, y + 20);
 }
 
 function render(t) {
