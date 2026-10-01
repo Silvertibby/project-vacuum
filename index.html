@@ -24,7 +24,1084 @@
 <body>
 <div id="safe"></div>
 <canvas id="c" width="900" height="700" tabindex="0"></canvas>
-<script>// Project Vacuum - prototype. (placeholder)
+<script>// Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
+(() => {
+'use strict';
+const W = 900, H = 700, CX = W / 2, CY = H / 2, R = 310;
+const TAU = Math.PI * 2;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ---------- tuning ----------
+const T = {
+  playerSpeed: 215, playerR: 7,
+  dashSpeed: 540, dashTime: 0.16, dashCd: 0.9,
+  // Rare pulse EVENTS: first at ~28s, then gaps of 32s growing +6s per pulse toward a 70s cap.
+  firstPulse: 28, warn: 3.5,
+  interval: n => Math.min(70, 26 + 6 * n),
+  pullDur: n => Math.min(6, 3.5 + 0.3 * n),           // pulse length (3.8s -> 6s)
+  // DANGER ZONE around the filter. The CORE kills anything that touches it; the zone is the visible hazard area.
+  coreR: n => Math.min(40, 24 + 2 * n),               // lethal core radius (grows with pulses)
+  coreSwell: 12,                                      // extra core radius at peak of a pulse
+  zoneBase: 34, zoneSwell: 28,                        // zone radius = core + zoneBase (+ zoneSwell at peak of a pulse)
+  // Pulls (px/s toward filter, scaled by pulse envelope):
+  playerPull: n => Math.min(170, 100 + 10 * n),       // < player speed 215, but x1.5 near the core => dash out
+  bugPull: n => Math.min(45, 18 + 3 * n),             // gentle nudge, ~15% of the old pull on bugs
+  clumpPull: n => Math.min(90, 50 + 5 * n),           // debris drifts in and gets eaten, so it recycles
+  bugAvoid: 130,                                      // non-Roach bugs steer away from the zone (px/s at the edge of the core)
+  mothPickup: 34,                                     // px: player within this of an unbonded Moth recruits it
+  protect: 4,                                         // seconds of spawn protection from the filter (no pull, can't be eaten)
+  // Continuous escalation between pulses (by ELAPSED TIME t): one bug every ~N s, one debris clump every ~M s
+  trickle: t => Math.max(1.8, 8 - t / 30),
+  debrisTrickle: t => Math.max(4, 9 - t / 25),
+  maxBugs: 45, maxClumps: 16,
+  // Per-type aggro: idle/wander until the player is within `aggro` px; de-aggro beyond `leash` px. (Roach: always chases.)
+  wasp:   { aggro: 300, leash: 400, keepMin: 150, keepMax: 235, windup: 0.65, speed: 235 },
+  spider: { aggro: 230, leash: 320, speed: 46, biteRange: 85 },
+  beetle: { aggro: 150, leash: 240 },
+  // Webs (laid by Spiders) never expire: they wait until something non-Spider crosses them. Not lethal.
+  //  player: 50% slow on a layer-1 web (up to 65% at max layers; dash 80% -> 70%); each pass removes one layer.
+  //  bugs (incl. Roaches): caught = stuck for ~webStuck s (longer per layer) at webStuckSlow speed, then one layer is removed. Spiders are immune.
+  webR: 17, webSlow: 0.5, webSlowMax: 0.35, /* speed multipliers: 0.5 = 50% slow on layer 1, 0.35 = 65% slow at max layers */ webDashSlow: 0.8, webDashSlowMax: 0.7, maxWebs: 120, webStuck: 1.0, webStuckSlow: 0.15, webPlayerMax: 1.0, webImmune: 0.6,
+  // Stacking: a Spider laying a web within webStackR of an existing web adds a LAYER (strength, cap webMaxStr). Each pass by the player or a bug
+  // (leaving / webPlayerMax s standing / bug freed) removes ONE layer; the web only tears at 0. Bugs stay stuck webStuckPerLayer longer per extra layer.
+  webStackR: 11, webMaxStr: 4, webStuckPerLayer: 0.3,
+  // Score (provisional): time*10 + lured kills*50 + webs broken by you*5 + webs broken by bugs*2 + pulses*100
+  score: { time: 10, lure: 50, webPlayer: 5, webBug: 2, pulse: 100 },
+  stingerLife: 2.6,
+  fightDmg: { sting: 1, charge: 2, lunge: 2 },        // friendly-fire damage to other bugs
+};
+
+const TYPES = {
+  roach:  { name: 'Roach',  color: '#ff5a3c', r: 9,  hp: 1, mass: 1.0,  desc: 'HUNTER: always chases you. Lure it into other bugs!' },
+  wasp:   { name: 'Wasp',   color: '#ffd23c', r: 8,  hp: 5, mass: 0.9,  desc: 'SHOOTER: keeps away, fires stinger bursts (they hit bugs too)' },
+  spider: { name: 'Spider', color: '#b36bff', r: 11, hp: 7, mass: 0.8,  desc: 'WEAVER: slow; webs slow you & bugs; re-laid webs stack (x4)' },
+  beetle: { name: 'Beetle', color: '#4fd36a', r: 14, hp: 4, mass: 0.6,  desc: 'CHARGER: telegraphs, then rams in a line through anything' },
+  moth:   { name: 'Moth',   color: '#5ee6ff', r: 7,  hp: 1, mass: 1.25, desc: 'ALLY: touch to recruit; it shields YOU (absorbs one hit on you)' },
+};
+
+// ---------- helpers ----------
+const rnd = (a = 1, b) => b === undefined ? Math.random() * a : a + Math.random() * (b - a);
+const hyp = Math.hypot;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const sstep = x => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
+function angLerp(a, b, t) { let d = ((b - a + Math.PI) % TAU + TAU) % TAU - Math.PI; return a + d * t; }
+let nextId = 1;
+
+let best = 0;
+try { best = parseFloat(localStorage.getItem('vacuum_best')) || 0; } catch (e) {}
+function saveBest(v) { try { localStorage.setItem('vacuum_best', String(v)); } catch (e) {} }
+// best SCORE is stored separately from best TIME; every run is also kept as a record (last 25 runs)
+let bestScore = 0;
+try { bestScore = parseFloat(localStorage.getItem('vacuum_best_score')) || 0; } catch (e) {}
+function saveRun(rec) {
+  try { localStorage.setItem('vacuum_best_score', String(bestScore)); } catch (e) {}
+  try { let runs = []; try { runs = JSON.parse(localStorage.getItem('vacuum_runs') || '[]') || []; } catch (e) {} runs.push(rec); if (runs.length > 25) runs = runs.slice(-25); localStorage.setItem('vacuum_runs', JSON.stringify(runs)); } catch (e) {}
+}
+
+// ---------- audio (tiny synth, optional) ----------
+let actx = null;
+function beep(f, d = 0.1, type = 'square', vol = 0.04) {
+  try {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.value = f; g.gain.value = vol;
+    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + d);
+    o.connect(g); g.connect(actx.destination); o.start(); o.stop(actx.currentTime + d);
+  } catch (e) {}
+}
+
+// iOS only lets audio start from a user gesture: create/resume the context on touch, play a silent buffer once.
+let audioUnlocked = false;
+function unlockAudio() {
+  try {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
+    if (!audioUnlocked) { const b = actx.createBuffer(1, 1, 22050), src = actx.createBufferSource(); src.buffer = b; src.connect(actx.destination); src.start(0); audioUnlocked = true; }
+  } catch (e) {}
+}
+
+// ---------- view / touch state ----------
+// World coordinates stay 900x700 (arena centre CX,CY). The canvas fills the screen and the VIEW (logical rect VX0,VY0,VW,VH)
+// is chosen so the whole arena (diameter ~660) is always visible, in portrait and landscape, at any devicePixelRatio.
+let dpr = 1, viewScale = 1, cssW = 900, cssH = 700, VX0 = 0, VY0 = 0, VW = 900, VH = 700;
+let safe = { t: 0, r: 0, b: 0, l: 0 };                // safe-area insets in CSS px (iPhone notch / home bar)
+let touchMode = false;                                // true once a touch is seen (or on coarse-pointer devices)
+const touch = { ax: 0, ay: 0, joy: null, joyOn: false, dashId: null, dashHeld: false, dashBuf: 0, pauseId: null };
+const JOY_R = 58, DASH_R = 46;
+try { touchMode = !!((window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || (navigator.maxTouchPoints > 0 && /iPhone|iPad|iPod|Android|Mobile/i.test(navigator.userAgent)) || ('ontouchstart' in window && !window.matchMedia('(pointer: fine)').matches)); } catch (e) {}
+function layoutTouch() { // button positions in CSS px
+  return {
+    dash: { x: cssW - safe.r - 74, y: cssH - safe.b - 88 },
+    pause: { x: cssW - safe.r - 34, y: safe.t + 70, r: 22 },
+    hint: { x: safe.l + 96, y: cssH - safe.b - 104 },
+  };
+}
+function resizeView() {
+  if (typeof canvas.getBoundingClientRect !== 'function') return;
+  const rect = canvas.getBoundingClientRect();
+  cssW = Math.max(1, rect.width); cssH = Math.max(1, rect.height);
+  dpr = Math.min(3, window.devicePixelRatio || 1);
+  const bw = Math.round(cssW * dpr), bh = Math.round(cssH * dpr);
+  if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
+  // the arena needs a 700x700 logical square (R=310 + rim + margin); fit that, extend the other axis
+  viewScale = Math.min(cssW, cssH) / 700;
+  VW = cssW / viewScale; VH = cssH / viewScale;
+  VX0 = CX - VW / 2;
+  // portrait: arena sits in the upper-middle so HUD fits above and thumbs have room below
+  const above = VH > 700 ? clamp(VH * 0.44, 350, VH - 350) : VH / 2;
+  VY0 = CY - above;
+  try { const el = document.getElementById('safe'); if (el) { const cs = getComputedStyle(el); safe = { t: parseFloat(cs.paddingTop) || 0, r: parseFloat(cs.paddingRight) || 0, b: parseFloat(cs.paddingBottom) || 0, l: parseFloat(cs.paddingLeft) || 0 }; } } catch (e) {}
+}
+
+// ---------- state ----------
+let G;
+const keys = {};
+let bgDust = [];
+for (let i = 0; i < 120; i++) { const a = rnd(TAU), r = Math.sqrt(Math.random()) * R; bgDust.push([CX + Math.cos(a) * r, CY + Math.sin(a) * r, rnd(0.6, 2)]); }
+
+function newGame(phase) {
+  G = {
+    phase: phase || 'ready', // ready | play | dead
+    t: 0, pulseN: 0, nextPulseAt: T.firstPulse, trickleT: 12, debrisT: 8,
+    pulseT: -1, pulseDur: 0, warned: false, spawnPlan: [],
+    filterR: T.coreR(0),
+    player: { x: CX, y: CY + 230, vx: 0, vy: 0, r: T.playerR, dashT: 0, dashCd: 0, dx: 0, dy: -1, ifr: 0, trail: [] },
+    bugs: [], clumps: [], parts: [], texts: [], streaks: [], webs: [], rings: [], stingers: [], tally: {},
+    lureKills: 0, sucked: 0, bugsKilled: 0, websPlayer: 0, websBugs: 0, score: 0, newBestScore: false, shake: 0, cause: '', newBest: false, deathT: 0, lastBeep: -1,
+  };
+  for (let i = 0; i < 40; i++) G.streaks.push({ a: rnd(TAU), r: rnd(R), l: rnd(10, 30) });
+  // opening population
+  const p = G.player;
+  const place = (type, rmin, rmax) => {
+    for (let k = 0; k < 40; k++) {
+      const a = rnd(TAU), r = rnd(rmin, rmax), x = CX + Math.cos(a) * r, y = CY + Math.sin(a) * r;
+      if (hyp(x - p.x, y - p.y) > 200) { const b = makeBug(type, x, y); b.spawn = 1.6; G.bugs.push(b); return; }
+    }
+  };
+  place('roach', 150, 260);
+  for (let i = 0; i < 2; i++) { place('wasp', 100, 250); place('spider', 100, 250); place('moth', 150, 250); } place('beetle', 100, 220);
+  for (let i = 0; i < 7; i++) addClump(rnd(TAU), rnd(70, 240));
+  return G;
+}
+
+function makeBug(type, x, y) {
+  const d = TYPES[type];
+  const ty = G.tally[type] || (G.tally[type] = { n: 0, fight: 0, sucked: 0, shield: 0, by: {} }); ty.n++;
+  return { id: nextId++, type, x, y, vx: 0, vy: 0, ang: rnd(TAU), r: d.r, hp: d.hp, spawn: 0.9, stun: 0, iCd: 0, flash: 0,
+    bonded: false, state: 'idle', st: 0, cd: type === 'wasp' ? rnd(2.5, 4) : rnd(0.5, 2), wt: 0, wa: rnd(TAU), dx: 0, dy: 0, lastHitBy: null,
+    protect: T.protect, aggro: false, webT: 0, stuck: 0, webImm: 0, caught: null };
+}
+function addClump(a, r) {
+  const rad = rnd(13, 22);
+  G.clumps.push({ x: CX + Math.cos(a) * r, y: CY + Math.sin(a) * r, r: rad, seed: rnd(100), spawn: 0.6 });
+}
+
+// ---------- fx ----------
+function burst(x, y, color, n, spd, life = 0.6) {
+  for (let i = 0; i < n; i++) { const a = rnd(TAU), s = rnd(spd * 0.3, spd);
+    G.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life, max: life, color, size: rnd(1.5, 3.5) }); }
+}
+function floatText(x, y, txt, color) { G.texts.push({ x, y, txt, color, life: 1.1 }); }
+
+// ---------- pulse logic ----------
+function pullEnv() {
+  if (G.pulseT < 0) return 0;
+  return Math.min(sstep(G.pulseT / 0.5), sstep((G.pulseDur - G.pulseT) / 0.6));
+}
+function zoneR() { return G.filterR + T.zoneBase + T.zoneSwell * pullEnv(); }
+// pull toward the filter: strength = base px/s * pulse envelope * mass; `near` adds up to +50% close to the core (player only)
+function pullVec(x, y, base, near) {
+  const env = pullEnv(); if (env <= 0) return [0, 0];
+  const dx = CX - x, dy = CY - y, d = hyp(dx, dy) || 1;
+  const s = base * env * (near ? 1 + Math.max(0, (150 - d) / 150) * 0.5 : 1);
+  return [dx / d * s, dy / d * s];
+}
+// non-Roach bugs steer away from the danger zone (added on top of AI velocity, so Roach AI stays exactly as before)
+function avoidVec(b) {
+  if (b.type === 'roach') return [0, 0];
+  const dx = b.x - CX, dy = b.y - CY, d = hyp(dx, dy) || 1, edge = zoneR() + 30, core = G.filterR + b.r;
+  if (d >= edge) return [0, 0];
+  const k = clamp((edge - d) / (edge - core), 0, 1) * T.bugAvoid;
+  return [dx / d * k, dy / d * k];
+}
+
+function pickType(mothCount) {
+  const w = { roach: 1.2, wasp: 1.2, spider: 1.2, beetle: 1, moth: mothCount < 2 ? 0.7 : 0 };
+  let sum = 0; for (const k in w) sum += w[k];
+  let r = rnd(sum), type = 'roach';
+  for (const k in w) { r -= w[k]; if (r <= 0) { type = k; break; } }
+  return type;
+}
+function spawnBug(type, x, y) {
+  const b = makeBug(type, x, y); G.bugs.push(b); return b;
+}
+// continuous trickle (scales with elapsed time): single bugs / small groups drop in at the rim, plus debris clumps
+function rimSpot() {
+  const p = G.player;
+  for (let k = 0; k < 30; k++) {
+    const a = rnd(TAU), x = CX + Math.cos(a) * (R - 26), y = CY + Math.sin(a) * (R - 26);
+    if (hyp(x - p.x, y - p.y) > 150) return [x, y];
+  }
+  return null;
+}
+function trickleSpawn(dt) {
+  if (G.pulseT >= 0 || G.nextPulseAt - G.t < T.warn + 0.5) return; // not during suction or the telegraph window
+  G.trickleT -= dt;
+  if (G.trickleT <= 0) {
+    G.trickleT = T.trickle(G.t) * rnd(0.8, 1.2);
+    if (G.bugs.length < T.maxBugs) {
+      const sp = rimSpot();
+      if (sp) {
+        const type = pickType(G.bugs.filter(b => b.type === 'moth').length);
+        spawnBug(type, sp[0], sp[1]);
+      }
+    }
+  }
+  G.debrisT -= dt;
+  if (G.debrisT <= 0) {
+    G.debrisT = T.debrisTrickle(G.t) * rnd(0.8, 1.2);
+    if (G.clumps.length < T.maxClumps) {
+      const p = G.player;
+      for (let k = 0; k < 30; k++) {
+        const a = rnd(TAU), r = rnd(G.filterR + T.zoneBase + T.zoneSwell + 50, R - 30), x = CX + Math.cos(a) * r, y = CY + Math.sin(a) * r;
+        if (hyp(x - p.x, y - p.y) > 70) { addClump(a, r); break; }
+      }
+    }
+  }
+}
+
+function planSpawns() {
+  const n = G.pulseN + 1; // upcoming pulse number
+  let budget = Math.min(18, 6 + n * 2); // big waves: pulses are rare events
+  const plan = [], p = G.player;
+  const mothCount = G.bugs.filter(b => b.type === 'moth').length;
+  const room = T.maxBugs - G.bugs.length;
+  const spot = () => {
+    for (let k = 0; k < 30; k++) { const a = rnd(TAU), x = CX + Math.cos(a) * (R - 26), y = CY + Math.sin(a) * (R - 26);
+      if (hyp(x - p.x, y - p.y) > 150) return [x, y]; }
+    const a = rnd(TAU); return [CX + Math.cos(a) * (R - 26), CY + Math.sin(a) * (R - 26)];
+  };
+  while (budget > 0 && plan.length < room) {
+    const type = pickType(mothCount + plan.filter(q => q.type === 'moth').length);
+    const [x, y] = spot(); plan.push({ type, x, y }); budget--;
+  }
+  const nc = Math.min(5, 3 + (n % 2)) - (G.clumps.length + 4 > T.maxClumps ? 2 : 0);
+  for (let i = 0; i < Math.max(0, nc); i++) { const [x, y] = spot(); plan.push({ type: 'clump', x, y }); }
+  G.spawnPlan = plan;
+}
+
+function startPulse() {
+  G.pulseN++; G.pulseT = 0; G.pulseDur = T.pullDur(G.pulseN); G.warned = false;
+  G.nextPulseAt = G.t + T.interval(G.pulseN); G.trickleT = Math.max(G.trickleT, 2.5);
+  for (const s of G.spawnPlan) {
+    if (s.type === 'clump') { if (G.clumps.length >= T.maxClumps) continue; const c = { x: s.x, y: s.y, r: rnd(13, 22), seed: rnd(100), spawn: 0.6 }; G.clumps.push(c); }
+    else spawnBug(s.type, s.x, s.y);
+  }
+  G.spawnPlan = [];
+  G.shake = 8; beep(80, 0.5, 'sawtooth', 0.08);
+}
+
+// ---------- bug AI ----------
+function nearest(b, pred, maxD) {
+  let best = null, bd = maxD;
+  for (const o of G.bugs) { if (o === b || o.spawn > 0 || !pred(o)) continue; const d = hyp(o.x - b.x, o.y - b.y); if (d < bd) { bd = d; best = o; } }
+  return best;
+}
+function wander(b, dt, speed) {
+  b.wt -= dt;
+  const dc = hyp(b.x - CX, b.y - CY);
+  if (b.wt <= 0) { b.wa = rnd(TAU); b.wt = rnd(1, 2.5); }
+  if (dc > R - 45) b.wa = Math.atan2(CY - b.y, CX - b.x);
+  return [Math.cos(b.wa) * speed, Math.sin(b.wa) * speed];
+}
+function isLethal(b) {
+  if (b.spawn > 0) return false;
+  return b.type === 'roach' || (b.type === 'spider' && b.state === 'lunge') || (b.type === 'beetle' && b.state === 'charge');
+}
+
+function updateBug(b, dt) {
+  const p = G.player;
+  if (b.spawn > 0) { b.spawn -= dt; return; }
+  b.iCd -= dt; b.flash -= dt; b.cd -= dt;
+  let dvx = 0, dvy = 0, accel = 8;
+  const dp = hyp(p.x - b.x, p.y - b.y);
+  const aggroCheck = (rin, rout) => { if (!b.aggro && dp < rin) b.aggro = true; else if (b.aggro && dp > rout) b.aggro = false; return b.aggro; };
+  const toward = (tx, ty, s) => { const d = hyp(tx - b.x, ty - b.y) || 1; return [(tx - b.x) / d * s, (ty - b.y) / d * s]; };
+
+  if (b.stun > 0) { b.stun -= dt; accel = 14; }
+  else switch (b.type) {
+    case 'roach': {
+      const s = Math.min(135, 92 + 2.5 * (G.pulseN + G.t / 15));
+      const wob = Math.sin(G.t * 3 + b.id) * 0.25, a = Math.atan2(p.y - b.y, p.x - b.x) + wob;
+      dvx = Math.cos(a) * s; dvy = Math.sin(a) * s; break;
+    }
+    case 'wasp': {
+      const ag = aggroCheck(T.wasp.aggro, T.wasp.leash), W = T.wasp, nx = (p.x - b.x) / (dp || 1), ny = (p.y - b.y) / (dp || 1);
+      if (b.state === 'windup') { // telegraph: aim tracks the player, then locks for the last 0.2s
+        b.st -= dt; accel = 10; dvx = -nx * 20; dvy = -ny * 20;
+        if (b.st > 0.2) { b.dx = nx; b.dy = ny; }
+        if (b.st <= 0) { fireStingers(b); b.state = 'move'; b.cd = Math.max(1.7, 3.1 - G.t / 110) * rnd(0.85, 1.15); }
+        break;
+      }
+      if (!ag) { [dvx, dvy] = wander(b, dt, 38); b.state = 'idle'; break; }
+      b.state = 'move';
+      const sd = Math.floor(G.t / 2.5 + b.id) % 2 ? 1 : -1, rad = dp < W.keepMin ? -1 : dp > W.keepMax ? 1 : 0;
+      dvx = nx * rad * 85 - ny * sd * 62; dvy = ny * rad * 85 + nx * sd * 62; accel = 5;
+      const dcw = hyp(b.x - CX, b.y - CY); if (dcw > R - 70) { dvx += (CX - b.x) / dcw * 70; dvy += (CY - b.y) / dcw * 70; }
+      if (b.cd <= 0 && dp < W.aggro + 20) { b.state = 'windup'; b.st = W.windup; b.dx = nx; b.dy = ny; }
+      break;
+    }
+    case 'spider': {
+      if (b.state === 'windup') { b.st -= dt; accel = 12; if (b.st <= 0) { b.state = 'lunge'; b.st = 0.28; } break; }
+      if (b.state === 'lunge') { b.st -= dt; dvx = b.dx * 220; dvy = b.dy * 220; accel = 16; if (b.st <= 0) { b.state = 'idle'; b.cd = 2.6; } break; }
+      const ag = aggroCheck(T.spider.aggro, T.spider.leash);
+      if (!ag) { [dvx, dvy] = wander(b, dt, 22); break; }
+      [dvx, dvy] = toward(p.x, p.y, T.spider.speed);
+      if (dp < T.spider.biteRange && b.cd <= 0) { b.state = 'windup'; b.st = 0.5; b.dx = (p.x - b.x) / (dp || 1); b.dy = (p.y - b.y) / (dp || 1); }
+      break;
+    }
+    case 'beetle': {
+      if (b.state === 'windup') { b.st -= dt; accel = 12; if (b.st <= 0) { b.state = 'charge'; b.st = 0.9; } break; }
+      if (b.state === 'charge') { b.st -= dt; dvx = b.dx * 200; dvy = b.dy * 200; accel = 10; if (b.st <= 0) { b.state = 'rest'; b.st = 1.3; } break; }
+      if (b.state === 'rest') { b.st -= dt; accel = 5; if (b.st <= 0) { b.state = 'idle'; b.cd = 0.8; } break; }
+      [dvx, dvy] = wander(b, dt, 28);
+      // only the PLAYER triggers a charge; whatever is in the line of the charge gets hit (friendly fire)
+      if (aggroCheck(T.beetle.aggro, T.beetle.leash) && b.cd <= 0 && dp < T.beetle.aggro) { b.state = 'windup'; b.st = 0.5; b.dx = (p.x - b.x) / (dp || 1); b.dy = (p.y - b.y) / (dp || 1); }
+      break;
+    }
+    case 'moth': {
+      if (!b.bonded) {
+        // unbonded: lazy idle drift, away from the danger zone, until the player comes close
+        if (dp < T.mothPickup + b.r + p.r) {
+          b.bonded = true; b.slot = G.bugs.filter(o => o.type === 'moth' && o.bonded).length - 1;
+          burst(b.x, b.y, '#5ee6ff', 12, 80, 0.5); floatText(b.x, b.y - 14, 'Moth recruited!', '#5ee6ff'); beep(880, 0.12, 'sine', 0.05);
+          break;
+        }
+        const dz = hyp(b.x - CX, b.y - CY);
+        if (dz < zoneR() + 60) b.wa = Math.atan2(b.y - CY, b.x - CX);
+        [dvx, dvy] = wander(b, dt, 14); accel = 2.5; break;
+      }
+      const idx = (b.slot !== undefined ? b.slot : b.id) % 3, a = G.t * 1.6 + idx * (TAU / 3), tx = p.x + Math.cos(a) * 38, ty = p.y + Math.sin(a) * 38;
+      const d = hyp(tx - b.x, ty - b.y);
+      [dvx, dvy] = toward(tx, ty, Math.min(230, d * 6)); accel = 10; break;
+    }
+  }
+  b.vx += (dvx - b.vx) * Math.min(1, accel * dt); b.vy += (dvy - b.vy) * Math.min(1, accel * dt);
+  b.protect = Math.max(0, b.protect - dt);
+  let [px, py] = (b.protect > 0 || (b.type === 'moth' && b.bonded)) ? [0, 0] : pullVec(b.x, b.y, T.bugPull(G.pulseN) * TYPES[b.type].mass * (b.state === 'charge' ? 0.5 : 1), false);
+  if (!(b.type === 'moth' && b.bonded)) { const [ax, ay] = avoidVec(b); px += ax; py += ay; }
+  let wf = 1; // webs: only a movement multiplier is applied (AI, incl. Roach chase, is untouched)
+  if (b.type !== 'spider' && !(b.type === 'moth' && b.bonded)) {
+    b.webImm = Math.max(0, b.webImm - dt);
+    if (b.stuck > 0) { b.stuck -= dt; wf = T.webStuckSlow; if (b.stuck <= 0) { weakenWebs(b.caught, 'bug'); b.caught = null; b.stuck = 0; b.webImm = T.webImmune; } }
+    else if (b.webImm <= 0) {
+      const ws = websAt(b.x, b.y);
+      if (ws.length) { b.stuck = T.webStuck * (1 + T.webStuckPerLayer * (maxStr(ws) - 1)) * rnd(0.85, 1.15); b.caught = ws; wf = T.webStuckSlow; burst(b.x, b.y, '#e6d8ff', 4, 40, 0.3); }
+    }
+  }
+  b.x += (b.vx * wf + px) * dt; b.y += (b.vy * wf + py) * dt;
+  if (b.type === 'spider') { // lays web wherever it walks
+    b.webT -= dt;
+    if (b.webT <= 0 && Math.abs(b.vx) + Math.abs(b.vy) > 12) { b.webT = 0.32; addWeb(b.x, b.y); }
+  }
+  if (Math.abs(b.vx) + Math.abs(b.vy) > 8) b.ang = angLerp(b.ang, Math.atan2(b.vy, b.vx), Math.min(1, 10 * dt));
+  keepIn(b);
+}
+const str = w => w.strength || 1;
+const maxStr = list => { let m = 1; for (const w of list) m = Math.max(m, str(w)); return m; };
+function addWeb(x, y) {
+  // laying on top of an existing web STACKS: +1 layer (cap T.webMaxStr) instead of a new patch
+  let near = null, nd = T.webStackR;
+  for (const w of G.webs) if (!w.dead) { const d = hyp(x - w.x, y - w.y); if (d < nd) { nd = d; near = w; } }
+  if (near) {
+    if (str(near) < T.webMaxStr) { near.strength = str(near) + 1; near.pulse = 0.4; G.rings.push({ x: near.x, y: near.y, r: near.r, life: 0.4, stack: true }); burst(near.x, near.y, '#cfe8ff', 3, 30, 0.3); }
+    return;
+  }
+  G.webs.push({ x, y, r: T.webR * rnd(0.9, 1.2), seed: rnd(100), dead: false, strength: 1, pulse: 0 });
+  if (G.webs.length > T.maxWebs) G.webs.shift(); // over the cap: the oldest web goes
+}
+function websAt(x, y) { const out = []; for (const w of G.webs) if (!w.dead && hyp(x - w.x, y - w.y) < w.r) out.push(w); return out; }
+// One pass removes ONE layer from each web in the list; a web only tears at 0. Every layer cleared counts as a web broken (who = 'player' | 'bug').
+function weakenWebs(list, who) {
+  if (!list) return;
+  for (const w of list) {
+    if (w.dead) continue;
+    w.strength = str(w) - 1;
+    if (who === 'player') G.websPlayer++; else G.websBugs++;
+    if (w.strength <= 0) { w.dead = true; burst(w.x, w.y, '#eadfff', 6, 85, 0.45); G.rings.push({ x: w.x, y: w.y, r: w.r, life: 0.4 }); }
+    else { w.pulse = 0.3; burst(w.x, w.y, '#eadfff', 3, 55, 0.3); G.rings.push({ x: w.x, y: w.y, r: w.r * 0.7, life: 0.3 }); }
+  }
+}
+function websBroken() { return G.websPlayer + G.websBugs; }
+function calcScore() { const S = T.score; return Math.floor(G.t * S.time + G.lureKills * S.lure + G.websPlayer * S.webPlayer + G.websBugs * S.webBug + G.pulseN * S.pulse); }
+function fireStingers(b) {
+  const n = Math.min(3, 1 + Math.floor(G.t / 50)), spd = T.wasp.speed + Math.min(40, G.t / 4), base = Math.atan2(b.dy, b.dx);
+  for (let i = 0; i < n; i++) {
+    const a = base + (i - (n - 1) / 2) * 0.22;
+    G.stingers.push({ x: b.x + Math.cos(a) * (b.r + 3), y: b.y + Math.sin(a) * (b.r + 3), vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, life: T.stingerLife, owner: b, r: 3 });
+  }
+  beep(760, 0.07, 'square', 0.03);
+}
+function updateStingers(dt) {
+  const p = G.player;
+  for (const s of G.stingers) {
+    s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+    if (s.life <= 0 || hyp(s.x - CX, s.y - CY) > R - 2 || hyp(s.x - CX, s.y - CY) < G.filterR) { s.dead = true; continue; }
+    for (const c of G.clumps) if (hyp(s.x - c.x, s.y - c.y) < c.r) { s.dead = true; burst(s.x, s.y, '#ffd23c', 3, 50, 0.25); break; }
+    if (s.dead) continue;
+    for (const b of G.bugs) { // friendly fire: stingers hit any bug except the shooter
+      if (b === s.owner || b.dead || b.spawn > 0 || b.type === 'moth' || hyp(s.x - b.x, s.y - b.y) > b.r + s.r) continue;
+      s.dead = true;
+      hurt(b, T.fightDmg.sting, s.owner, 0.12);
+      burst(s.x, s.y, '#ffd23c', 4, 60, 0.3); break;
+    }
+    if (s.dead) continue;
+    if (G.phase === 'play' && p.ifr <= 0 && hyp(s.x - p.x, s.y - p.y) < p.r + s.r) { s.dead = true; if (!absorbHit(null)) die('Stung by a Wasp'); }
+  }
+  G.stingers = G.stingers.filter(s => !s.dead);
+  G.bugs = G.bugs.filter(b => !b.dead);
+}
+function keepIn(e) {
+  const d = hyp(e.x - CX, e.y - CY), lim = R - e.r - 2;
+  if (d > lim) { e.x = CX + (e.x - CX) / d * lim; e.y = CY + (e.y - CY) / d * lim; }
+  for (const c of G.clumps) {
+    const dx = e.x - c.x, dy = e.y - c.y, dd = hyp(dx, dy), m = c.r + e.r;
+    if (dd < m) { const n = dd || 1; e.x = c.x + dx / n * m; e.y = c.y + dy / n * m; }
+  }
+}
+
+function hurt(b, dmg, attacker, icd) {
+  if (b.iCd > 0 || b.hp <= 0 || (b.type === 'moth' && b.bonded)) return;
+  b.hp -= dmg; b.iCd = icd; b.flash = 0.15; b.lastHitBy = attacker;
+  burst(b.x, b.y, TYPES[b.type].color, 6, 90, 0.4);
+  if (b.hp <= 0) killBug(b, 'fight');
+}
+function killBug(b, how) {
+  if (b.dead) return;
+  b.hp = 0; b.dead = true;
+  const ty = G.tally[b.type]; if (ty) { ty[how] = (ty[how] || 0) + 1; const k = b.lastHitBy ? b.lastHitBy.type : 'none'; if (how === 'fight') ty.by[k] = (ty.by[k] || 0) + 1; }
+  if (how === 'fight' || how === 'sucked') G.bugsKilled++;
+  const col = TYPES[b.type].color;
+  if (how === 'sucked') {
+    G.sucked++; burst(b.x, b.y, col, 10, 120, 0.5);
+  } else {
+    burst(b.x, b.y, col, 18, 170, 0.8);
+    if (how === 'fight') { G.lureKills++; floatText(b.x, b.y - 12, TYPES[b.type].name + ' down!', col); beep(300, 0.12, 'triangle', 0.05); }
+    else if (how === 'shield') { floatText(b.x, b.y - 12, 'shield!', col); beep(700, 0.12, 'sine', 0.06); }
+  }
+}
+
+function bugInteractions() {
+  const bs = G.bugs;
+  for (let i = 0; i < bs.length; i++) {
+    const a = bs[i]; if (a.dead || a.spawn > 0) continue;
+    for (let j = i + 1; j < bs.length; j++) {
+      const b = bs[j]; if (b.dead || b.spawn > 0) continue;
+      const dx = b.x - a.x, dy = b.y - a.y, d = hyp(dx, dy), m = a.r + b.r;
+      if (d >= m) continue;
+      const n = d || 1, o = (m - d) / 2;
+      if (a.type !== 'moth' && b.type !== 'moth') { // soft push apart
+        a.x -= dx / n * o * 0.6; a.y -= dy / n * o * 0.6; b.x += dx / n * o * 0.6; b.y += dy / n * o * 0.6;
+      }
+      pairRule(a, b); pairRule(b, a);
+    }
+  }
+  G.bugs = bs.filter(b => !b.dead);
+}
+// pairRule(x, y): what x does to y on contact
+function pairRule(x, y) {
+  if (x.dead || y.dead) return;
+  // Moths (bonded or not) are never harmed by other bugs: a bonded Moth only breaks when it blocks a hit on the PLAYER (see absorbHit)
+  // friendly fire: charges and lunges hurt whatever they run into (never the same kind, never Moths)
+  if (x.type === 'beetle' && x.state === 'charge' && y.type !== 'beetle' && y.type !== 'moth') hurt(y, T.fightDmg.charge, x, 0.5);
+  else if (x.type === 'spider' && x.state === 'lunge' && y.type !== 'spider' && y.type !== 'moth') hurt(y, T.fightDmg.lunge, x, 0.6);
+}
+// Shield: a recruited Moth spends itself ONLY when a lethal hit lands on the player. Returns true if the hit was blocked.
+function absorbHit(attacker) {
+  const p = G.player;
+  let m = null, md = 1e9;
+  for (const o of G.bugs) if (o.type === 'moth' && o.bonded && !o.dead) { const d = attacker ? hyp(o.x - attacker.x, o.y - attacker.y) : hyp(o.x - p.x, o.y - p.y); if (d < md) { md = d; m = o; } }
+  if (!m) return false;
+  killBug(m, 'shield');
+  burst(p.x, p.y, '#5ee6ff', 26, 190, 0.7); burst(m.x, m.y, '#e8fbff', 14, 120, 0.5);
+  G.rings.push({ x: p.x, y: p.y, r: 14, life: 0.4, shield: true });
+  floatText(p.x, p.y - 20, 'SHIELD BROKE!', '#5ee6ff'); G.shake = Math.max(G.shake, 6); beep(700, 0.15, 'sine', 0.06);
+  p.ifr = Math.max(p.ifr, 0.7);
+  const x = attacker;
+  if (x) { x.stun = 0.8; if (x.state === 'charge') { x.state = 'rest'; x.st = 1.0; } if (x.state === 'lunge') { x.state = 'idle'; x.cd = 2.6; } }
+  return true;
+}
+
+// ---------- player ----------
+function updatePlayer(dt) {
+  const p = G.player;
+  let ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  let iy = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+  const il = hyp(ix, iy); if (il > 0) { ix /= il; iy /= il; p.dx = ix; p.dy = iy; }
+  else if (touch.joyOn) { const m = hyp(touch.ax, touch.ay); if (m > 0) { ix = touch.ax; iy = touch.ay; p.dx = ix / m; p.dy = iy / m; } } // analog stick (magnitude <= 1)
+  touch.dashBuf = Math.max(0, touch.dashBuf - dt);
+  p.dashCd -= dt; p.ifr -= dt;
+  if ((keys.Space || touch.dashHeld || touch.dashBuf > 0) && p.dashCd <= 0 && p.dashT <= 0) {
+    p.dashT = T.dashTime; p.dashCd = T.dashCd; p.ifr = T.dashTime + 0.06; beep(520, 0.08, 'triangle', 0.04);
+    burst(p.x, p.y, '#fff4d6', 6, 60, 0.3);
+  }
+  let tvx, tvy;
+  if (p.dashT > 0) { p.dashT -= dt; tvx = p.dx * T.dashSpeed; tvy = p.dy * T.dashSpeed; p.vx = tvx; p.vy = tvy; }
+  else { tvx = ix * T.playerSpeed; tvy = iy * T.playerSpeed; const k = Math.min(1, 22 * dt); p.vx += (tvx - p.vx) * k; p.vy += (tvy - p.vy) * k; }
+  const [px, py] = pullVec(p.x, p.y, T.playerPull(G.pulseN), true);
+  const under = websAt(p.x, p.y);
+  p.webbed = under.length > 0; p.webStr = p.webbed ? maxStr(under) : 0;
+  if (p.webbed) { // stuck on the web(s): slowed while on them; each pass (leave, or webPlayerMax s standing) removes one layer
+    p.webTime = (p.webTime || 0) + dt; p.webTouched = p.webTouched || [];
+    for (const w of under) if (!p.webTouched.includes(w)) p.webTouched.push(w);
+    if (p.webTime >= T.webPlayerMax) { weakenWebs(p.webTouched, 'player'); p.webTouched = []; p.webTime = 0; }
+  } else if (p.webTouched && p.webTouched.length) { weakenWebs(p.webTouched, 'player'); p.webTouched = []; p.webTime = 0; }
+  else p.webTime = 0;
+  const lay = Math.max(0, p.webStr - 1) / Math.max(1, T.webMaxStr - 1);
+  const wf = p.webbed ? (p.dashT > 0 ? T.webDashSlow + (T.webDashSlowMax - T.webDashSlow) * lay : T.webSlow + (T.webSlowMax - T.webSlow) * lay) : 1;
+  p.webSlowNow = p.webbed ? 1 - wf : 0;
+  p.x += (p.vx * wf + px) * dt; p.y += (p.vy * wf + py) * dt;
+  keepIn(p);
+  p.trail.push([p.x, p.y, p.dashT > 0 ? 1 : 0]); if (p.trail.length > 8) p.trail.shift();
+}
+
+function die(reason) {
+  if (G.phase !== 'play') return;
+  G.phase = 'dead'; G.cause = reason; G.deathT = 0;
+  G.newBest = G.t > best; if (G.newBest) { best = G.t; saveBest(best); }
+  G.score = calcScore(); G.newBestScore = G.score > bestScore; if (G.newBestScore) bestScore = G.score;
+  G.record = { time: +G.t.toFixed(1), pulses: G.pulseN, luredKills: G.lureKills, websBroken: websBroken(), websByPlayer: G.websPlayer, websByBugs: G.websBugs, bugsKilled: G.bugsKilled, lostToFilter: G.sucked, score: G.score, cause: reason, ts: Date.now() };
+  saveRun(G.record);
+  G.shake = 14; burst(G.player.x, G.player.y, '#fff4d6', 30, 220, 1);
+  beep(120, 0.6, 'sawtooth', 0.1);
+}
+
+// ---------- main update ----------
+function step(dt) {
+  // cosmetic updates always run
+  for (const q of G.parts) { q.x += q.vx * dt; q.y += q.vy * dt; q.vx *= 0.96; q.vy *= 0.96; q.life -= dt; }
+  G.parts = G.parts.filter(q => q.life > 0);
+  for (const q of G.texts) { q.y -= 25 * dt; q.life -= dt; }
+  G.texts = G.texts.filter(q => q.life > 0);
+  G.shake = Math.max(0, G.shake - 30 * dt);
+  if (G.phase === 'ready') return;
+  if (G.phase === 'dead') { G.deathT += dt; return; }
+
+  G.t += dt;
+  const p = G.player;
+
+  // pulse scheduler
+  if (G.pulseT >= 0) {
+    G.pulseT += dt;
+    if (G.pulseT >= G.pulseDur) G.pulseT = -1;
+  }
+  if (G.pulseT < 0) {
+    const tl = G.nextPulseAt - G.t;
+    if (tl <= T.warn && !G.warned) { G.warned = true; planSpawns(); }
+    if (G.warned && tl > 0) { const s = Math.ceil(tl); if (s !== G.lastBeep) { G.lastBeep = s; beep(440 + (3 - s) * 110, 0.12, 'square', 0.04); } }
+    if (tl <= 0) startPulse();
+  }
+  // filter grows with pulses (storm-circle feel), eased
+  const fr = T.coreR(G.pulseN) + T.coreSwell * pullEnv();
+  G.filterR += (fr - G.filterR) * Math.min(1, 3 * dt);
+
+  updatePlayer(dt);
+  trickleSpawn(dt);
+  for (const b of G.bugs) updateBug(b, dt);
+  bugInteractions();
+  updateStingers(dt);
+  for (const r of G.rings) r.life -= dt;
+  G.rings = G.rings.filter(r => r.life > 0);
+  for (const w of G.webs) if (w.pulse > 0) w.pulse = Math.max(0, w.pulse - dt);
+  G.webs = G.webs.filter(w => !w.dead);
+
+  // clumps
+  for (const c of G.clumps) {
+    if (c.spawn > 0) { c.spawn -= dt; continue; }
+    const [px, py] = pullVec(c.x, c.y, T.clumpPull(G.pulseN), false); c.x += px * dt; c.y += py * dt;
+  }
+  // webs get swept toward the filter by the pulse like dust (weaker) and are consumed by it, so the pulse also clears the webs
+  if (pullEnv() > 0) for (const w of G.webs) {
+    const [px, py] = pullVec(w.x, w.y, T.clumpPull(G.pulseN) * 0.8, false); w.x += px * dt; w.y += py * dt;
+    if (hyp(w.x - CX, w.y - CY) < G.filterR + 2) { w.dead = true; burst(w.x, w.y, '#eadfff', 4, 60, 0.4); }
+  }
+  for (const c of G.clumps) if (hyp(c.x - CX, c.y - CY) < G.filterR + 2) { c.dead = true; burst(c.x, c.y, '#8d8678', 10, 80, 0.5); }
+  G.clumps = G.clumps.filter(c => !c.dead);
+  // re-resolve collisions after clumps moved
+  keepIn(p); for (const b of G.bugs) if (b.spawn <= 0) keepIn(b);
+
+  // filter kills bugs
+  for (const b of G.bugs) if (!b.dead && b.spawn <= 0 && b.protect <= 0 && !(b.type === 'moth' && b.bonded) && hyp(b.x - CX, b.y - CY) < G.filterR + b.r * 0.4) killBug(b, 'sucked');
+  G.bugs = G.bugs.filter(b => !b.dead);
+
+  // player death
+  if (hyp(p.x - CX, p.y - CY) < G.filterR + p.r * 0.5) die('Burned in the filter core');
+  if (G.phase === 'play' && p.ifr <= 0) {
+    for (const b of G.bugs) {
+      if (isLethal(b) && hyp(b.x - p.x, b.y - p.y) < b.r + p.r - 2) { if (absorbHit(b)) break; die({ roach: 'Caught by a Roach', spider: 'Bitten by a Spider', beetle: 'Rammed by a Beetle' }[b.type] || 'Caught by a ' + TYPES[b.type].name); break; }
+    }
+    G.bugs = G.bugs.filter(b => !b.dead);
+  }
+
+  // pull streak particles
+  const env = pullEnv();
+  for (const s of G.streaks) {
+    s.r -= (40 + T.playerPull(Math.max(1, G.pulseN)) * 1.2 * env) * dt;
+    if (s.r < G.filterR + 4) { s.r = R - rnd(0, 30); s.a = rnd(TAU); s.l = rnd(10, 30); }
+  }
+}
+
+// ---------- render ----------
+function drawCanister(t) {
+  const g = ctx.createRadialGradient(CX, CY, 20, CX, CY, R);
+  g.addColorStop(0, '#1b2230'); g.addColorStop(1, '#10141d');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(CX, CY, R, 0, TAU); ctx.fill();
+  ctx.fillStyle = 'rgba(180,170,150,0.10)';
+  for (const d of bgDust) { ctx.beginPath(); ctx.arc(d[0], d[1], d[2], 0, TAU); ctx.fill(); }
+}
+function drawFilter(t) {
+  const fr = G.filterR, env = pullEnv();
+  const warnP = G.warned && G.pulseT < 0 ? 1 - clamp((G.nextPulseAt - G.t) / T.warn, 0, 1) : 0;
+  // DANGER ZONE: hazard area around the core; swells + pulses red/orange during a pulse, flickers during the warning
+  const zr = zoneR(), pulse = 0.5 + 0.5 * Math.sin(t * (3 + 9 * Math.max(env, warnP)));
+  const za = 0.10 + 0.10 * pulse + 0.18 * env + 0.12 * warnP;
+  const zg = ctx.createRadialGradient(CX, CY, fr, CX, CY, zr);
+  zg.addColorStop(0, `rgba(255,90,40,${za * 2.2})`); zg.addColorStop(1, `rgba(255,150,30,${za * 0.35})`);
+  ctx.fillStyle = zg; ctx.beginPath(); ctx.arc(CX, CY, zr, 0, TAU); ctx.fill();
+  ctx.strokeStyle = `rgba(255,${130 + 80 * pulse | 0},40,${0.45 + 0.4 * pulse})`; ctx.lineWidth = 2 + 2 * env;
+  ctx.setLineDash([10, 8]); ctx.lineDashOffset = t * 25; ctx.beginPath(); ctx.arc(CX, CY, zr, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+  const glow = ctx.createRadialGradient(CX, CY, fr * 0.6, CX, CY, fr * 2.4);
+  glow.addColorStop(0, `rgba(255,70,50,${0.25 + 0.5 * env + 0.2 * warnP})`); glow.addColorStop(1, 'rgba(255,70,50,0)');
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(CX, CY, fr * 2.4, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#05060a'; ctx.beginPath(); ctx.arc(CX, CY, fr, 0, TAU); ctx.fill();
+  ctx.strokeStyle = 'rgba(140,150,170,0.45)'; ctx.lineWidth = 1;
+  ctx.save(); ctx.beginPath(); ctx.arc(CX, CY, fr, 0, TAU); ctx.clip();
+  for (let i = -fr; i <= fr; i += 7) { ctx.beginPath(); ctx.moveTo(CX + i, CY - fr); ctx.lineTo(CX + i, CY + fr); ctx.stroke(); ctx.beginPath(); ctx.moveTo(CX - fr, CY + i); ctx.lineTo(CX + fr, CY + i); ctx.stroke(); }
+  ctx.restore();
+  ctx.strokeStyle = env > 0 ? '#ff4630' : '#c0392b'; ctx.lineWidth = 3;
+  ctx.setLineDash([8, 6]); ctx.lineDashOffset = -t * 30;
+  ctx.beginPath(); ctx.arc(CX, CY, fr, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+}
+function drawStreaks() {
+  const env = pullEnv(); const warnP = G.warned && G.pulseT < 0 ? 0.25 : 0;
+  const a = Math.max(env * 0.5, warnP * 0.5, 0.06);
+  ctx.strokeStyle = `rgba(255,150,130,${a})`; ctx.lineWidth = 1.5;
+  for (const s of G.streaks) {
+    const c = Math.cos(s.a), n = Math.sin(s.a), len = s.l * (0.5 + env * 1.5);
+    ctx.beginPath(); ctx.moveTo(CX + c * s.r, CY + n * s.r); ctx.lineTo(CX + c * (s.r + len), CY + n * (s.r + len)); ctx.stroke();
+  }
+}
+function drawClump(c, t) {
+  if (c.spawn > 0) ctx.globalAlpha = 0.4;
+  ctx.fillStyle = '#6f695d'; ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#8d8678';
+  for (let i = 0; i < 7; i++) { const a = c.seed + i * 0.9, r = c.r * 0.55; ctx.beginPath(); ctx.arc(c.x + Math.cos(a) * r, c.y + Math.sin(a) * r, c.r * 0.45, 0, TAU); ctx.fill(); }
+  ctx.strokeStyle = '#3c3830'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, TAU); ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+function drawWebs(t) {
+  for (const w of G.webs) { // unspent webs stay fully visible (no fade); more layers = denser, thicker, brighter
+    const n = str(w), k = (n - 1) / Math.max(1, T.webMaxStr - 1), pu = w.pulse > 0 ? w.pulse : 0;
+    ctx.fillStyle = `rgba(214,196,255,${0.20 + 0.14 * (n - 1) + pu * 0.4})`; ctx.beginPath(); ctx.arc(w.x, w.y, w.r + (n - 1) * 0.8, 0, TAU); ctx.fill();
+    ctx.strokeStyle = `rgba(${238 - 40 * k | 0},${228 + 20 * k | 0},255,${Math.min(1, 0.62 + 0.13 * (n - 1))})`; ctx.lineWidth = 1 + 0.45 * (n - 1);
+    const sp = 6 + 2 * (n - 1);
+    for (let i = 0; i < sp; i++) { const an = w.seed + i * TAU / sp; ctx.beginPath(); ctx.moveTo(w.x, w.y); ctx.lineTo(w.x + Math.cos(an) * w.r, w.y + Math.sin(an) * w.r); ctx.stroke(); }
+    for (let j = 1; j <= n; j++) { ctx.beginPath(); ctx.arc(w.x, w.y, w.r * (j / n) * (j === n ? 1 : 0.9), 0, TAU); ctx.stroke(); }
+    if (n === 1) { ctx.beginPath(); ctx.arc(w.x, w.y, w.r * 0.55, 0, TAU); ctx.stroke(); }
+    if (n >= 2) { ctx.fillStyle = 'rgba(255,255,255,0.95)'; ctx.font = 'bold 10px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.fillText('x' + n, w.x, w.y + 3.5); }
+  }
+  for (const r of G.rings) { // tear/stack/shield effect rings
+    const k = 1 - r.life / 0.4, c = r.shield ? '94,230,255' : r.stack ? '170,255,200' : '240,230,255';
+    ctx.strokeStyle = `rgba(${c},${(r.shield ? 0.9 : 0.8) * Math.max(0, 1 - k)})`; ctx.lineWidth = r.shield ? 3 : 2;
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.r * (1 + (r.shield ? 2.2 : r.stack ? 0.3 : 0.9) * k), 0, TAU); ctx.stroke();
+  }
+}
+function drawStingers(t) {
+  for (const s of G.stingers) {
+    const a = Math.atan2(s.vy, s.vx);
+    ctx.strokeStyle = 'rgba(255,230,120,0.5)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(s.x - Math.cos(a) * 9, s.y - Math.sin(a) * 9); ctx.lineTo(s.x, s.y); ctx.stroke();
+    ctx.fillStyle = '#fff6b0'; ctx.shadowColor = '#ffd23c'; ctx.shadowBlur = 8; ctx.beginPath(); ctx.arc(s.x, s.y, s.r + 0.5, 0, TAU); ctx.fill(); ctx.shadowBlur = 0;
+  }
+}
+function drawBug(b, t) {
+  const d = TYPES[b.type], col = d.color;
+  ctx.save(); ctx.translate(b.x, b.y);
+  if (b.spawn > 0) { ctx.globalAlpha = 0.35 + 0.3 * Math.sin(t * 20); }
+  const lethal = isLethal(b) || b.spawn > 0 && b.type !== 'moth' && b.type !== 'beetle';
+  if (b.stuck > 0) { // caught in a web: strands + a wobbling pale ring
+    ctx.strokeStyle = 'rgba(240,230,255,0.85)'; ctx.lineWidth = 1.2;
+    for (let i = 0; i < 6; i++) { const an = i * TAU / 6 + 0.4, w = Math.sin(t * 25 + i) * 1.5; ctx.beginPath(); ctx.moveTo(Math.cos(an) * (b.r + 1), Math.sin(an) * (b.r + 1)); ctx.lineTo(Math.cos(an) * (b.r + 9 + w), Math.sin(an) * (b.r + 9 + w)); ctx.stroke(); }
+    ctx.setLineDash([3, 2]); ctx.beginPath(); ctx.arc(0, 0, b.r + 5 + Math.sin(t * 25) * 0.8, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+  }
+  if (b.stun > 0) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(0, 0, b.r + 5 + Math.sin(t * 30) * 2, 0, TAU); ctx.stroke(); }
+  if (b.protect > 0 && b.spawn <= 0) { // spawn protection: faint shield ring that fades out
+    ctx.strokeStyle = `rgba(140,230,255,${0.2 + 0.5 * Math.min(1, b.protect / 1.5)})`; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.arc(0, 0, b.r + 5, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+  }
+  ctx.rotate(b.ang);
+  const fl = b.flash > 0;
+  const body = fl ? '#fff' : col;
+  const legs = (n, len, spread, w) => { ctx.strokeStyle = '#000'; ctx.lineWidth = w; for (let i = 0; i < n; i++) { const a = (i / n) * TAU + 0.3; const wig = Math.sin(t * 25 + i * 2) * 0.12; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a + wig) * len, Math.sin(a + wig) * len); ctx.stroke(); } };
+  switch (b.type) {
+    case 'roach':
+      ctx.strokeStyle = body; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(b.r * 0.8, -2); ctx.lineTo(b.r * 1.7, -6 + Math.sin(t * 12) * 2); ctx.moveTo(b.r * 0.8, 2); ctx.lineTo(b.r * 1.7, 6 - Math.sin(t * 12) * 2); ctx.stroke();
+      ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.2, b.r * 0.8, 0, 0, TAU); ctx.fill();
+      ctx.strokeStyle = '#7a1c0c'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(-b.r, 0); ctx.lineTo(b.r * 0.9, 0); ctx.stroke(); break;
+    case 'wasp':
+      ctx.fillStyle = 'rgba(255,255,255,0.4)'; const wf = Math.sin(t * 60) * 2; ctx.beginPath(); ctx.ellipse(-2, -b.r - wf, 6, 3, 0.4, 0, TAU); ctx.ellipse(-2, b.r + wf, 6, 3, -0.4, 0, TAU); ctx.fill();
+      ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.3, b.r * 0.75, 0, 0, TAU); ctx.fill();
+      if (!fl) { ctx.fillStyle = '#222'; ctx.fillRect(-4, -b.r * 0.7, 3, b.r * 1.4); ctx.fillRect(2, -b.r * 0.6, 3, b.r * 1.2); }
+      ctx.fillStyle = '#c33'; ctx.beginPath(); ctx.moveTo(-b.r * 1.3, 0); ctx.lineTo(-b.r * 1.8, 0); ctx.lineTo(-b.r * 1.3, 2); ctx.fill();
+      if (b.state === 'windup') { // telegraph: aim line in the (world) firing direction + charging glow
+        ctx.save(); ctx.rotate(-b.ang); const n = Math.min(3, 1 + Math.floor(G.t / 50));
+        for (let i = 0; i < n; i++) { const a = Math.atan2(b.dy, b.dx) + (i - (n - 1) / 2) * 0.22;
+          ctx.strokeStyle = `rgba(255,${160 + 80 * Math.sin(t * 30) | 0},60,0.55)`; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(Math.cos(a) * b.r, Math.sin(a) * b.r); ctx.lineTo(Math.cos(a) * 150, Math.sin(a) * 150); ctx.stroke(); ctx.setLineDash([]); }
+        ctx.fillStyle = 'rgba(255,240,150,0.8)'; ctx.beginPath(); ctx.arc(Math.cos(Math.atan2(b.dy, b.dx)) * (b.r + 4), Math.sin(Math.atan2(b.dy, b.dx)) * (b.r + 4), 3 + 2 * Math.sin(t * 40), 0, TAU); ctx.fill(); ctx.restore(); }
+      break;
+    case 'spider': {
+      const flare = b.state === 'windup' ? 1.5 : 1;
+      legs(8, b.r * 1.7 * flare, 0, 2);
+      ctx.strokeStyle = body; ctx.lineWidth = 1.5;
+      ctx.fillStyle = body; ctx.beginPath(); ctx.arc(0, 0, b.r, 0, TAU); ctx.fill();
+      ctx.fillStyle = b.state === 'windup' ? '#ff3030' : '#200a30'; ctx.beginPath(); ctx.arc(b.r * 0.4, -3, 2, 0, TAU); ctx.arc(b.r * 0.4, 3, 2, 0, TAU); ctx.fill();
+      if (b.state === 'windup') { ctx.strokeStyle = 'rgba(255,60,60,0.6)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(b.r, 0); ctx.lineTo(b.r + 70, 0); ctx.stroke(); }
+      break; }
+    case 'beetle': {
+      const ch = b.state === 'charge', wu = b.state === 'windup';
+      if (b.state === 'rest') ctx.globalAlpha *= 0.8;
+      ctx.fillStyle = fl ? '#fff' : (ch ? '#ff9a2e' : col); ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.15, b.r, 0, 0, TAU); ctx.fill();
+      ctx.strokeStyle = '#1a5a2a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(-b.r, 0); ctx.lineTo(b.r * 0.6, 0); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, b.r * 0.9, Math.PI * 0.6, Math.PI * 1.4); ctx.stroke();
+      ctx.fillStyle = ch || wu ? '#ff6a20' : '#2b8a40'; ctx.beginPath(); ctx.moveTo(b.r * 1.1, -4); ctx.lineTo(b.r * 1.9, 0); ctx.lineTo(b.r * 1.1, 4); ctx.fill();
+      if (wu) { ctx.strokeStyle = 'rgba(255,150,40,0.7)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, b.r + 5 + Math.sin(t * 30) * 2, 0, TAU); ctx.stroke(); }
+      if (b.state === 'rest') { ctx.rotate(-b.ang); ctx.fillStyle = '#fff'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('z', 0, -b.r - 4); }
+      break; }
+    case 'moth': {
+      const fa = Math.sin(t * 18 + b.id) * 0.5;
+      const pr = b.bonded ? 20 : 20 + 5 * Math.sin(t * 3 + b.id), pa = b.bonded ? 0.45 : 0.55 + 0.25 * Math.sin(t * 3 + b.id);
+      const g = ctx.createRadialGradient(0, 0, 1, 0, 0, pr); g.addColorStop(0, `rgba(94,230,255,${pa})`); g.addColorStop(1, 'rgba(94,230,255,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, pr, 0, TAU); ctx.fill();
+      if (!b.bonded) { // beacon: slow expanding ring so unrecruited Moths are findable
+        const k = (t * 0.6 + b.id * 0.37) % 1;
+        ctx.strokeStyle = `rgba(94,230,255,${0.5 * (1 - k)})`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(0, 0, 10 + 24 * k, 0, TAU); ctx.stroke();
+      }
+      ctx.fillStyle = fl ? '#fff' : 'rgba(150,240,255,0.85)';
+      ctx.beginPath(); ctx.ellipse(-1, -6, 4, 7 * (1 + fa * 0.3), 0.3, 0, TAU); ctx.ellipse(-1, 6, 4, 7 * (1 - fa * 0.3), -0.3, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#e8fbff'; ctx.beginPath(); ctx.ellipse(1, 0, 4, 2.2, 0, 0, TAU); ctx.fill();
+      break; }
+  }
+  // danger outline for always-hostile bugs
+  if (lethal && b.type !== 'beetle') { ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1; }
+  ctx.restore();
+}
+function drawPlayer(t) {
+  const p = G.player;
+  for (let i = 0; i < p.trail.length; i++) { const q = p.trail[i]; if (q[2]) { ctx.fillStyle = `rgba(255,244,214,${i / p.trail.length * 0.4})`; ctx.beginPath(); ctx.arc(q[0], q[1], p.r, 0, TAU); ctx.fill(); } }
+  ctx.save(); ctx.translate(p.x, p.y);
+  const g = ctx.createRadialGradient(0, 0, 2, 0, 0, 22); g.addColorStop(0, 'rgba(255,244,214,0.5)'); g.addColorStop(1, 'rgba(255,244,214,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 22, 0, TAU); ctx.fill();
+  ctx.rotate(Math.atan2(p.dy, p.dx));
+  ctx.fillStyle = p.ifr > 0 ? '#ffffff' : '#fff4d6'; ctx.beginPath(); ctx.arc(0, 0, p.r, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(3, -2.5, 1.5, 0, TAU); ctx.arc(3, 2.5, 1.5, 0, TAU); ctx.fill();
+  ctx.restore();
+  const nsh = G.bugs.filter(o => o.type === 'moth' && o.bonded).length;
+  if (nsh > 0) { ctx.strokeStyle = `rgba(94,230,255,${0.35 + 0.2 * Math.sin(t * 6)})`; ctx.lineWidth = 1.5 + nsh * 0.7; ctx.beginPath(); ctx.arc(p.x, p.y, p.r + 10, 0, TAU); ctx.stroke(); }
+  // dash cooldown arc
+  const f = 1 - clamp(p.dashCd / T.dashCd, 0, 1);
+  ctx.strokeStyle = f >= 1 ? 'rgba(120,255,160,0.6)' : 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(p.x, p.y, p.r + 5, -Math.PI / 2, -Math.PI / 2 + TAU * f); ctx.stroke();
+}
+function drawWarning(t) {
+  if (!G.warned || G.pulseT >= 0) return;
+  const tl = G.nextPulseAt - G.t, prog = 1 - clamp(tl / T.warn, 0, 1);
+  // contracting rings
+  ctx.lineWidth = 3;
+  for (let i = 0; i < 4; i++) {
+    const k = (t * 0.7 + i / 4) % 1, rr = G.filterR + (R - G.filterR) * (1 - k);
+    ctx.strokeStyle = `rgba(255,70,50,${(0.15 + 0.35 * prog) * k})`; ctx.beginPath(); ctx.arc(CX, CY, rr, 0, TAU); ctx.stroke();
+  }
+  // rim flash
+  const flash = 0.4 + 0.6 * Math.abs(Math.sin(t * (4 + prog * 8)));
+  ctx.strokeStyle = `rgba(255,60,40,${flash * (0.3 + 0.6 * prog)})`; ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.arc(CX, CY, R - 2, 0, TAU); ctx.stroke();
+  // spawn markers
+  for (const s of G.spawnPlan) {
+    const col = s.type === 'clump' ? '#a39b8a' : TYPES[s.type].color, rr = 8 + prog * 6 + Math.sin(t * 10) * 2;
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.arc(s.x, s.y, rr, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = col; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('+', s.x, s.y + 3);
+  }
+}
+function drawHUD(t) {
+  if (G.phase === 'play' && G.player.webbed) { ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(225,205,255,0.9)'; ctx.font = 'bold 12px system-ui,sans-serif'; ctx.fillText('STUCK -' + Math.round((G.player.webSlowNow || 0.5) * 100) + '%' + (G.player.webStr > 1 ? '  (layer ' + G.player.webStr + ')' : ''), G.player.x, G.player.y - 18); }
+  // HUD is anchored to the visible view (inside the safe area), not to the arena
+  ctx.save();
+  const sl = safe.l / viewScale, sr = safe.r / viewScale, st = safe.t / viewScale, sb = safe.b / viewScale;
+  ctx.translate(VX0 + sl, VY0 + st);
+  const W = VW - sl - sr, H = VH - st - sb, CX = W / 2;
+  ctx.textAlign = 'left'; ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 26px system-ui,sans-serif';
+  ctx.fillText(G.t.toFixed(1) + 's', 16, 38);
+  ctx.font = '13px system-ui,sans-serif'; ctx.fillStyle = '#8fa0c8';
+  ctx.fillText('Pulses: ' + G.pulseN, 16, 58);
+  ctx.fillText('Lured kills: ' + G.lureKills, 16, 76);
+  ctx.fillText('Bugs: ' + G.bugs.length + '   Dust: ' + G.clumps.length, 16, 94);
+  ctx.fillText('Webs broken: ' + websBroken(), 16, 112);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#ffd23c'; ctx.font = 'bold 16px system-ui,sans-serif';
+  ctx.fillText('BEST ' + Math.max(best, G.phase === 'play' ? 0 : 0).toFixed(1) + 's', W - 16, 32);
+  if (!touchMode) { ctx.fillStyle = '#8fa0c8'; ctx.font = '12px system-ui,sans-serif'; ctx.fillText('WASD/Arrows move   Space dash   R restart   P pause', W - 16, H - 14); }
+  // pulse banner
+  ctx.textAlign = 'center';
+  if (G.pulseT >= 0) {
+    const left = G.pulseDur - G.pulseT, env = pullEnv();
+    ctx.fillStyle = `rgba(255,90,70,${0.6 + 0.4 * Math.sin(t * 14)})`; ctx.font = 'bold 22px system-ui,sans-serif';
+    ctx.fillText('FILTER SURGE! ' + left.toFixed(1), CX, 36);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(CX - 100, 46, 200, 6);
+    ctx.fillStyle = '#ff5a46'; ctx.fillRect(CX - 100, 46, 200 * clamp(left / G.pulseDur, 0, 1), 6);
+  } else {
+    const tl = Math.max(0, G.nextPulseAt - G.t);
+    if (G.warned) {
+      ctx.fillStyle = `rgba(255,${120 + 100 * Math.sin(t * 12)},70,1)`; ctx.font = 'bold 26px system-ui,sans-serif';
+      ctx.fillText('VACUUM PULSE IN ' + tl.toFixed(1), CX, 38);
+      ctx.font = '12px system-ui,sans-serif'; ctx.fillStyle = '#ffb0a0'; ctx.fillText('+ ' + G.spawnPlan.length + ' arriving at the rim' + ' - the filter zone swells, keep clear', CX, 56);
+    } else {
+      ctx.fillStyle = '#7f8db0'; ctx.font = '16px system-ui,sans-serif'; ctx.fillText('next pulse ' + tl.toFixed(0) + 's', CX, 32);
+    }
+  }
+  ctx.restore();
+}
+function wrapLines(txt, maxW) {
+  const words = txt.split(' '), lines = []; let cur = '';
+  for (const w of words) { const test = cur ? cur + ' ' + w : w; if (cur && ((ctx.measureText(test) || {}).width || 0) > maxW) { lines.push(cur); cur = w; } else cur = test; }
+  if (cur) lines.push(cur); return lines;
+}
+function overlay(lines, sub) {
+  ctx.fillStyle = 'rgba(5,6,10,0.78)'; ctx.fillRect(VX0 - 2, VY0 - 2, VW + 4, VH + 4);
+  ctx.textAlign = 'center';
+  let y = lines.y; const maxW = Math.min(W - 20, VW - 30);
+  for (const l of lines.items) {
+    ctx.fillStyle = l.c || '#e6ecff'; ctx.font = l.f;
+    const ls = wrapLines(l.t, maxW), lh = Math.round(parseFloat(/(\d+(?:\.\d+)?)px/.exec(l.f)[1]) * 1.3);
+    ls.forEach((ln, i) => ctx.fillText(ln, CX, y + i * lh));
+    y += l.h + (ls.length - 1) * lh;
+  }
+}
+function drawLegend(y0) {
+  ctx.textAlign = 'left';
+  const order = ['roach', 'wasp', 'spider', 'beetle', 'moth'];
+  order.forEach((k, i) => { const y = y0 + i * 26, d = TYPES[k];
+    ctx.fillStyle = d.color; ctx.beginPath(); ctx.arc(CX - 250, y - 5, 7, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 14px system-ui,sans-serif'; ctx.fillText(d.name, CX - 232, y);
+    ctx.fillStyle = '#9fb0d8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText(d.desc, CX - 150, y); });
+  // danger-zone note
+  const y = y0 + order.length * 26 + 4;
+  const zg = ctx.createRadialGradient(CX - 250, y - 5, 2, CX - 250, y - 5, 11);
+  zg.addColorStop(0, '#05060a'); zg.addColorStop(0.5, '#05060a'); zg.addColorStop(0.55, 'rgba(255,110,40,0.7)'); zg.addColorStop(1, 'rgba(255,150,30,0.2)');
+  ctx.fillStyle = zg; ctx.beginPath(); ctx.arc(CX - 250, y - 5, 11, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 14px system-ui,sans-serif'; ctx.fillText('Filter', CX - 232, y);
+  ctx.fillStyle = '#9fb0d8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText('orange DANGER ZONE: the dark core kills anything; it swells on a pulse.', CX - 150, y);
+}
+
+function render(t) {
+  ctx.save();
+  ctx.setTransform(dpr * viewScale, 0, 0, dpr * viewScale, -VX0 * dpr * viewScale, -VY0 * dpr * viewScale);
+  ctx.clearRect(VX0, VY0, VW, VH); ctx.fillStyle = '#07080c'; ctx.fillRect(VX0 - 2, VY0 - 2, VW + 4, VH + 4);
+  if (G.shake > 0) ctx.translate(rnd(-G.shake, G.shake) * 0.5, rnd(-G.shake, G.shake) * 0.5);
+  drawCanister(t);
+  drawStreaks();
+  ctx.save(); ctx.beginPath(); ctx.arc(CX, CY, R, 0, TAU); ctx.clip();
+  drawWarning(t);
+  drawWebs(t);
+  for (const c of G.clumps) drawClump(c, t);
+  drawFilter(t);
+  for (const b of G.bugs) drawBug(b, t);
+  drawStingers(t);
+  if (G.phase !== 'dead' || G.deathT < 0.05) drawPlayer(t);
+  for (const q of G.parts) { ctx.globalAlpha = clamp(q.life / q.max, 0, 1); ctx.fillStyle = q.color; ctx.fillRect(q.x, q.y, q.size, q.size); }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  // glass rim
+  ctx.strokeStyle = '#3a4560'; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(CX, CY, R + 3, 0, TAU); ctx.stroke();
+  ctx.strokeStyle = 'rgba(200,220,255,0.18)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(CX, CY, R + 8, -2.6, -1.4); ctx.stroke();
+  for (const q of G.texts) { ctx.globalAlpha = clamp(q.life, 0, 1); ctx.fillStyle = q.color; ctx.font = 'bold 13px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.fillText(q.txt, q.x, q.y); }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  ctx.save(); ctx.setTransform(dpr * viewScale, 0, 0, dpr * viewScale, -VX0 * dpr * viewScale, -VY0 * dpr * viewScale); // HUD + overlays share the view transform
+  drawHUD(t);
+
+  if (paused && G.phase === 'play') overlay({ y: 330, items: [{ t: 'PAUSED', f: 'bold 48px system-ui,sans-serif', h: 40 }, { t: pausedByBlur ? 'Window lost focus. Click here or press any key to resume' : (touchMode ? 'tap to resume' : 'press P, any key, or click to resume'), f: '16px system-ui,sans-serif', h: 20, c: '#9fb0d8' }] });
+  if (G.phase === 'ready') {
+    overlay({ y: 140, items: [
+      { t: 'PROJECT VACUUM', f: 'bold 56px system-ui,sans-serif', h: 46, c: '#ff6a50' },
+      { t: 'You are a bug inside a vacuum canister. You cannot fight. Survive.', f: '17px system-ui,sans-serif', h: 28 },
+      { t: 'Bugs and dust keep dropping in. Every so often a VACUUM PULSE swells the filter danger zone and drags you in.', f: '15px system-ui,sans-serif', h: 22, c: '#9fb0d8' },
+      { t: 'Lure bugs into each other: stingers and Beetle charges hit whatever is in the way.', f: '15px system-ui,sans-serif', h: 22, c: '#9fb0d8' },
+    ] });
+    drawLegend(330);
+    ctx.textAlign = 'center'; ctx.fillStyle = '#ffd23c'; ctx.font = 'bold 22px system-ui,sans-serif';
+    ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t * 5); ctx.fillText(touchMode ? 'TAP to start' : 'Press SPACE or a move key to start', CX, 560); ctx.globalAlpha = 1;
+    ctx.fillStyle = '#8fa0c8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText(touchMode ? 'Drag to move, tap DASH (brief invulnerability)' : 'WASD / Arrows = move     Space = dash (brief invulnerability)     R = restart', CX, 592);
+    if (best > 0) { ctx.fillStyle = '#ffd23c'; ctx.fillText('Best: ' + best.toFixed(1) + 's', CX, 620); }
+    ctx.font = '12px system-ui,sans-serif'; ctx.textAlign = 'center';
+    if (!keyboardSeen && !touchMode) { ctx.fillStyle = `rgba(255,210,60,${0.55 + 0.35 * Math.sin(t * 4)})`; ctx.fillText('Click the game to focus it, then use the keyboard', CX, 644); }
+    else if (keyboardSeen) { ctx.fillStyle = 'rgba(140,200,160,0.55)'; ctx.fillText('keys: ok', CX, 644); }
+  }
+  if (G.phase === 'dead' && G.deathT > 0.5) {
+    overlay({ y: 220, items: [
+      { t: 'GAME OVER', f: 'bold 54px system-ui,sans-serif', h: 44, c: '#ff6a50' },
+      { t: G.cause, f: '18px system-ui,sans-serif', h: 40, c: '#ffb0a0' },
+      { t: 'You survived ' + G.t.toFixed(1) + 's', f: 'bold 30px system-ui,sans-serif', h: 36 },
+      { t: G.newBest ? 'NEW BEST!' : 'Best: ' + best.toFixed(1) + 's', f: 'bold 20px system-ui,sans-serif', h: 30, c: '#ffd23c' },
+      { t: 'Pulses survived: ' + G.pulseN + '   Bugs lured to death: ' + G.lureKills + '   Bugs lost to the filter: ' + G.sucked, f: '15px system-ui,sans-serif', h: 26, c: '#9fb0d8' },
+      { t: 'Webs broken: ' + websBroken() + ' (you ' + G.websPlayer + ', bugs ' + G.websBugs + ')   Bugs killed: ' + G.bugsKilled, f: '15px system-ui,sans-serif', h: 34, c: '#9fb0d8' },
+      { t: 'Score: ' + G.score + ' (provisional)' + (G.newBestScore ? '  NEW BEST SCORE!' : '   Best score: ' + Math.floor(bestScore)), f: 'bold 20px system-ui,sans-serif', h: 36, c: '#8fe3a0' },
+      { t: touchMode ? 'TAP to restart' : 'Press R to restart', f: 'bold 22px system-ui,sans-serif', h: 24, c: '#e6ecff' },
+    ] });
+  }
+  ctx.restore();
+  drawTouchUI(t);
+}
+
+function drawTouchUI(t) {
+  if (!touchMode || typeof canvas.getBoundingClientRect !== 'function') return;
+  ctx.save(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const L = layoutTouch(), p = G.player, playing = G.phase === 'play';
+  // joystick (floating): faint hint ring when idle, base + knob where the thumb is
+  if (playing) {
+    if (touch.joy) {
+      const j = touch.joy, kx = j.x - j.ox, ky = j.y - j.oy, kd = hyp(kx, ky), kk = kd > JOY_R ? JOY_R / kd : 1;
+      ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(j.ox, j.oy, JOY_R, 0, TAU); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,244,214,0.55)'; ctx.beginPath(); ctx.arc(j.ox + kx * kk, j.oy + ky * kk, 26, 0, TAU); ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 2; ctx.setLineDash([6, 6]);
+      ctx.beginPath(); ctx.arc(L.hint.x, L.hint.y, JOY_R, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.font = 'bold 12px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.fillText('MOVE', L.hint.x, L.hint.y + 4);
+    }
+    // DASH button (bottom-right) with cooldown sweep
+    const f = 1 - clamp(p.dashCd / T.dashCd, 0, 1), ready = f >= 1, held = touch.dashHeld;
+    ctx.fillStyle = held ? 'rgba(120,255,160,0.45)' : ready ? 'rgba(120,255,160,0.18)' : 'rgba(255,255,255,0.08)';
+    ctx.beginPath(); ctx.arc(L.dash.x, L.dash.y, DASH_R, 0, TAU); ctx.fill();
+    ctx.strokeStyle = ready ? 'rgba(120,255,160,0.85)' : 'rgba(255,255,255,0.35)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(L.dash.x, L.dash.y, DASH_R, -Math.PI / 2, -Math.PI / 2 + TAU * f); ctx.stroke();
+    ctx.fillStyle = ready ? '#d8ffe4' : 'rgba(255,255,255,0.55)'; ctx.font = 'bold 15px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.fillText('DASH', L.dash.x, L.dash.y + 5);
+    // pause button
+    ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(L.pause.x, L.pause.y, L.pause.r, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    if (paused) { ctx.beginPath(); ctx.moveTo(L.pause.x - 5, L.pause.y - 8); ctx.lineTo(L.pause.x + 8, L.pause.y); ctx.lineTo(L.pause.x - 5, L.pause.y + 8); ctx.fill(); }
+    else { ctx.fillRect(L.pause.x - 7, L.pause.y - 8, 5, 16); ctx.fillRect(L.pause.x + 2, L.pause.y - 8, 5, 16); }
+  }
+  ctx.restore();
+}
+
+// ---------- touch input (pointer events, multi-touch) ----------
+function touchReset() { touch.joy = null; touch.joyOn = false; touch.ax = touch.ay = 0; touch.dashId = null; touch.dashHeld = false; touch.dashBuf = 0; touch.pauseId = null; }
+function localXY(e) { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+function setupTouch() {
+  if (typeof canvas.addEventListener !== 'function') return;
+  const stop = e => { if (e.cancelable) e.preventDefault(); };
+  canvas.addEventListener('pointerdown', e => {
+    stop(e);
+    unlockAudio();
+    const isTouch = e.pointerType !== 'mouse';
+    if (isTouch) touchMode = true;
+    const [x, y] = localXY(e), L = layoutTouch();
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    if (paused) { resumeGame(); return; }
+    if (G.phase === 'ready') { G.phase = 'play'; if (!isTouch) return; }
+    else if (G.phase === 'dead') { if (G.deathT > 0.6) { startRun(); paused = false; touchReset(); } return; }
+    if (!isTouch) return;
+    if (hyp(x - L.pause.x, y - L.pause.y) < L.pause.r + 12) { paused = true; touch.pauseId = e.pointerId; return; }
+    if (hyp(x - L.dash.x, y - L.dash.y) < DASH_R * 1.4 && touch.dashId === null) { touch.dashId = e.pointerId; touch.dashHeld = true; touch.dashBuf = 0.18; return; }
+    if (x < cssW * 0.5 && touch.joy === null) { touch.joy = { id: e.pointerId, ox: x, oy: y, x, y }; touch.joyOn = true; touch.ax = touch.ay = 0; }
+  }, { passive: false });
+  canvas.addEventListener('pointermove', e => {
+    stop(e);
+    const j = touch.joy; if (!j || j.id !== e.pointerId) return;
+    const [x, y] = localXY(e); j.x = x; j.y = y;
+    let dx = x - j.ox, dy = y - j.oy, d = hyp(dx, dy);
+    if (d > JOY_R) { j.ox += dx / d * (d - JOY_R); j.oy += dy / d * (d - JOY_R); dx = x - j.ox; dy = y - j.oy; d = hyp(dx, dy); } // floating: base follows the thumb
+    const m = Math.min(1, d / JOY_R), dz = 0.14;
+    if (m < dz) { touch.ax = touch.ay = 0; } else { const k = (m - dz) / (1 - dz) / (d || 1) * (d / JOY_R > 0.0001 ? 1 : 0); const mag = (m - dz) / (1 - dz); touch.ax = dx / d * mag; touch.ay = dy / d * mag; }
+  }, { passive: false });
+  const up = e => {
+    stop(e); unlockAudio();
+    if (touch.joy && touch.joy.id === e.pointerId) { touch.joy = null; touch.joyOn = false; touch.ax = touch.ay = 0; }
+    if (touch.dashId === e.pointerId) { touch.dashId = null; touch.dashHeld = false; }
+    if (touch.pauseId === e.pointerId) touch.pauseId = null;
+  };
+  canvas.addEventListener('pointerup', up, { passive: false });
+  canvas.addEventListener('pointercancel', up, { passive: false });
+  canvas.addEventListener('lostpointercapture', up, { passive: false });
+  // belt and braces for iOS Safari: no scrolling, pinch/double-tap zoom, callout menu or rubber-banding
+  for (const ev of ['touchstart', 'touchmove', 'gesturestart', 'gesturechange', 'gestureend', 'contextmenu']) canvas.addEventListener(ev, stop, { passive: false });
+  canvas.addEventListener('touchend', e => { stop(e); unlockAudio(); }, { passive: false });
+  document.addEventListener('touchmove', stop, { passive: false });
+  window.addEventListener('resize', resizeView);
+  window.addEventListener('orientationchange', () => { resizeView(); setTimeout(resizeView, 120); setTimeout(resizeView, 400); });
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', resizeView);
+  document.addEventListener('visibilitychange', () => { if (document.hidden && G.phase === 'play') { paused = true; touchReset(); } });
+}
+
+// ---------- input & loop ----------
+let paused = false;
+function startRun() { newGame('play'); }
+// Keyboard: robust against focus problems. Keys are read by e.code with an e.key fallback (case-insensitive), listeners are
+// on window AND document in the capture phase, and the canvas/body are focusable and re-focused on load / click / pointerdown.
+const KEYNAMES = ['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyR', 'KeyP', 'Escape'];
+const KEYFALLBACK = { w: 'KeyW', a: 'KeyA', s: 'KeyS', d: 'KeyD', r: 'KeyR', p: 'KeyP', ' ': 'Space', spacebar: 'Space', escape: 'Escape', esc: 'Escape',
+  arrowup: 'ArrowUp', arrowdown: 'ArrowDown', arrowleft: 'ArrowLeft', arrowright: 'ArrowRight', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight' };
+function keyCode(e) {
+  if (e.code && KEYNAMES.includes(e.code)) return e.code;
+  const k = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+  return KEYFALLBACK[k] || e.code || '';
+}
+let keyboardSeen = false, pausedByBlur = false;
+function focusGame() { try { window.focus(); if (document.body && document.body.focus) document.body.focus({ preventScroll: true }); canvas.focus({ preventScroll: true }); } catch (e) {} }
+function resumeGame() { if (paused) { paused = false; pausedByBlur = false; last = performance.now(); } }
+function onKeyDown(e) {
+  if (e.__vacHandled) return; e.__vacHandled = true;       // window + document capture both fire: handle once
+  const code = keyCode(e);
+  if (!keyboardSeen) { keyboardSeen = true; }
+  if (e.isTrusted !== false && touchMode) touchMode = false; // a real keydown means a keyboard is in use (hybrid laptops): show keyboard text
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(code)) e.preventDefault();
+  if (code === 'KeyR') { startRun(); paused = false; pausedByBlur = false; return; }
+  if (code === 'KeyP' || code === 'Escape') { if (G.phase === 'play') { if (paused) resumeGame(); else paused = true; } return; }
+  if (paused) resumeGame();                                  // ANY other key resumes (and still registers below)
+  keys[code] = true;
+  if (G.phase === 'ready' && ['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(code)) { G.phase = 'play'; }
+  if (!actx) beep(1, 0.01, 'sine', 0.0001);
+}
+function onKeyUp(e) { const code = keyCode(e); keys[code] = false; if (e.key && e.key.length === 1) { const c2 = KEYFALLBACK[e.key.toLowerCase()]; if (c2) keys[c2] = false; } }
+if (typeof window !== 'undefined') {
+  for (const tgt of [window, document]) if (tgt && typeof tgt.addEventListener === 'function') { tgt.addEventListener('keydown', onKeyDown, true); tgt.addEventListener('keyup', onKeyUp, true); }
+  window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; touchReset(); if (G.phase === 'play' && !paused) { paused = true; pausedByBlur = true; } });
+  window.addEventListener('focus', () => { for (const k in keys) keys[k] = false; });
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('pointerdown', () => { focusGame(); if (pausedByBlur) resumeGame(); }, true);
+    document.addEventListener('click', () => { focusGame(); if (pausedByBlur) resumeGame(); }, true);
+  }
+  try { if (document.body) document.body.setAttribute('tabindex', '0'); canvas.setAttribute('tabindex', '0'); } catch (e) {}
+  window.addEventListener('load', focusGame); setTimeout(focusGame, 0);
+}
+
+newGame('ready');
+setupTouch();
+resizeView();
+let last = performance.now(), clock = 0;
+function frame(now) {
+  if (typeof canvas.getBoundingClientRect === 'function') { const r = canvas.getBoundingClientRect(); if (Math.abs(r.width - cssW) > 0.5 || Math.abs(r.height - cssH) > 0.5 || dpr !== Math.min(3, window.devicePixelRatio || 1)) resizeView(); }
+  const dt = Math.min(0.033, (now - last) / 1000); last = now; clock += dt;
+  if (!paused) step(dt);
+  render(clock);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// test hook (used by headless checks)
+window.__vac = { touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, R, CX, CY, render, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb };
+})();
 </script>
 </body>
 </html>
