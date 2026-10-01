@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Project Vacuum (prototype)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#07080c">
+<style>
+  *{-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#07080c;color:#cfd6e6;font-family:system-ui,sans-serif;
+    overscroll-behavior:none;touch-action:none;-webkit-text-size-adjust:100%}
+  body{position:fixed;inset:0}                       /* fixed body: no scroll, no rubber-band, no pull-to-refresh */
+  canvas{position:fixed;left:0;top:0;width:100%;height:100%;height:100dvh;display:block;background:#07080c;
+    touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;outline:none}
+  /* hidden probe so JS can read the iPhone safe-area insets (notch / home indicator) */
+  #safe{position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+</style>
+</head>
+<body>
+<div id="safe"></div>
+<canvas id="c" width="900" height="700" tabindex="0"></canvas>
+<script>// Project Vacuum - prototype. (placeholder)
+</script>
+</body>
+</html>
