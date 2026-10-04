@@ -34,7 +34,7 @@
 <script>// Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
 (() => {
 'use strict';
-const VERSION = '0.15.0'; // keep in sync with CHANGELOG.md
+const VERSION = '0.16.0'; // keep in sync with CHANGELOG.md
 const W = 900, H = 700, CX = W / 2, CY = H / 2;   // CX,CY = centre of the arena AND the filter (the arena itself is a rounded RECTANGLE sized to the screen, see setArena)
 let AW = 760, AH = 540, AX0 = CX - 380, AX1 = CX + 380, AY0 = CY - 270, AY1 = CY + 270; // arena rect in world units (updated by computeLayout)
 const CORNER = 40;                                // rounded-corner radius of the canister
@@ -1147,7 +1147,7 @@ function render(t) {
     ctx.font = '12px system-ui,sans-serif'; ctx.textAlign = 'center';
     if (!keyboardSeen && !touchMode) { ctx.fillStyle = `rgba(255,210,60,${0.55 + 0.35 * Math.sin(t * 4)})`; ctx.fillText('Click the game to focus it, then use the keyboard', CX, 644); }
     else if (keyboardSeen) { ctx.fillStyle = 'rgba(140,200,160,0.55)'; ctx.fillText('keys: ok', CX, 644); }
-    drawVerLabel(); ctx.textAlign = 'center';
+    drawVerLabel(); drawShareBtn(); ctx.textAlign = 'center';
   }
   if (G.phase === 'dead' && G.deathT > 0.5) {
     overlay({ y: 220, items: [
@@ -1161,8 +1161,9 @@ function render(t) {
       { t: touchMode ? 'TAP to restart' : 'Press R to restart', f: 'bold 22px system-ui,sans-serif', h: 24, c: '#e6ecff' },
     ] });
   }
-  if (G.phase === 'dead' && G.deathT > 0.5) drawVerLabel();
+  if (G.phase === 'dead' && G.deathT > 0.5) { drawVerLabel(); drawShareBtn(); }
   if (G.phase === 'play' || (G.phase === 'dead' && G.deathT <= 0.5)) verBtn = null;
+  if (G.phase !== 'ready' && !(G.phase === 'dead' && G.deathT > 0.5)) { share.btn = null; share.down = null; }
   if (clog.open) drawChangelog(t); else clog.panel = null;
   ctx.restore();
   if (!clog.open) drawTouchUI(t);
@@ -1220,6 +1221,7 @@ function setupTouch() {
       return;
     }
     if (verBtn && (G.phase === 'ready' || (G.phase === 'dead' && G.deathT > 0.5)) && !paused) { const [lx, ly] = toLogical(x, y); if (inRect(verBtn, lx, ly)) { openClog(); return; } }
+    if (share.btn && (G.phase === 'ready' || (G.phase === 'dead' && G.deathT > 0.5)) && !paused) { const [lx, ly] = toLogical(x, y); if (inRect(share.btn, lx, ly)) { share.down = e.pointerId; return; } } // fires on release (iOS needs a real tap-up for navigator.share)
     if (paused) { resumeGame(); return; }
     if (G.phase === 'ready') { G.phase = 'play'; if (!isTouch) return; }
     else if (G.phase === 'dead') { if (G.deathT > 0.6) { startRun(); paused = false; touchReset(); } return; }
@@ -1241,6 +1243,7 @@ function setupTouch() {
   const up = e => {
     stop(e); unlockAudio();
     if (clog.drag && clog.drag.id === e.pointerId) clog.drag = null;
+    if (share.down === e.pointerId) { share.down = null; if (e.type === 'pointerup' && share.btn && !clog.open) { const [sx, sy] = localXY(e), [lx, ly] = toLogical(sx, sy); if (inRect(share.btn, lx, ly)) doShare(); } return; }
     if (touch.joy && touch.joy.id === e.pointerId) { touch.joy = null; touch.joyOn = false; touch.ax = touch.ay = 0; }
     if (touch.dashId === e.pointerId) { touch.dashId = null; touch.dashHeld = false; }
     if (touch.pauseId === e.pointerId) touch.pauseId = null;
@@ -1250,7 +1253,7 @@ function setupTouch() {
   canvas.addEventListener('lostpointercapture', up, { passive: false });
   // belt and braces for iOS Safari: no scrolling, pinch/double-tap zoom, callout menu or rubber-banding
   for (const ev of ['touchstart', 'touchmove', 'gesturestart', 'gesturechange', 'gestureend', 'contextmenu']) canvas.addEventListener(ev, stop, { passive: false });
-  for (const ev of ['selectstart', 'dragstart', 'dblclick']) document.addEventListener(ev, stop, { passive: false }); // no text selection / image drag / double-tap zoom in app mode
+  for (const ev of ['selectstart', 'dragstart', 'dblclick']) document.addEventListener(ev, e => { if (share.box && e.target && share.box.contains(e.target)) return; stop(e); }, { passive: false }); // no text selection / image drag / double-tap zoom in app mode
   canvas.addEventListener('touchend', e => { stop(e); unlockAudio(); }, { passive: false });
   document.addEventListener('touchmove', stop, { passive: false });
   canvas.addEventListener('wheel', e => { if (clog.open) { e.preventDefault(); clogScrollBy(e.deltaY * (e.deltaMode === 1 ? 16 : 1)); } }, { passive: false });
@@ -1262,6 +1265,8 @@ function setupTouch() {
 
 // ---------- in-game changelog (condensed from CHANGELOG.md; newest first). '## ' = version heading, '- ' = bullet ----------
 const CHANGELOG = [
+  '## v0.16.0 - 2026-10-03 (~20:50 PT)',
+  '- Share button on the start and game-over screens (bottom right): opens the share sheet on iPhone / app mode, otherwise copies the game link and shows "Link copied!", or shows the link in a box you can copy by hand. It always shares https://silvertibby.github.io/project-vacuum/. Cancelling the share sheet does nothing. No gameplay changes.',
   '## v0.15.0 - 2026-10-03 (~20:30 PT)',
   '- More frequent pulses, same weak pull and the same 3.5 s warning: the first pulse is at ~20 s (was 28 s) and gaps grow 20, 22, 24 ... s up to a 40 s cap (was 32 s growing to 70 s). Pulse strength (core size, pull, length) still ramps up, but at half the rate per pulse, so it matches the old strength at the same point in the run.',
   '- Waves at each pulse are slightly smaller (5 + 1.5 per pulse, up to 16 bugs) because pulses come about twice as often; the pulse score bonus is now 60 per pulse (was 100).',
@@ -1342,6 +1347,83 @@ function drawVerLabel() {
   ctx.fillStyle = 'rgba(180,196,235,0.85)'; ctx.fillText(txt, x, base);
   ctx.fillRect(x, base + 2, tw, 1);
 }
+// ---------- share button (start + game-over screens) ----------
+// Always shares the canonical Pages URL (never location.href, which may be a file:/data: URL). navigator.share when present (iOS Safari / app mode),
+// else clipboard (async API, then hidden textarea + execCommand), else a small selectable URL box. A cancelled share (AbortError) is silent.
+const SHARE = { url: 'https://silvertibby.github.io/project-vacuum/', title: 'Project Vacuum', text: 'Try this bug survival game!' };
+const share = { btn: null, down: null, busy: false, toast: '', until: 0, box: null };
+function shareToast(msg) { share.toast = msg; share.until = performance.now() + 2200; }
+function copyViaTextarea(txt) {
+  try {
+    const ta = document.createElement('textarea'); ta.value = txt; ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;font-size:16px;-webkit-user-select:text;user-select:text';
+    document.body.appendChild(ta); ta.focus({ preventScroll: true }); ta.select(); ta.setSelectionRange(0, txt.length);
+    const ok = !!(document.execCommand && document.execCommand('copy'));
+    document.body.removeChild(ta); focusGame(); return ok;
+  } catch (e) { return false; }
+}
+function hideUrlBox() { if (share.box) { try { share.box.remove(); } catch (e) {} share.box = null; focusGame(); } }
+function showUrlBox() {
+  if (share.box) return;
+  const bd = document.createElement('div');
+  bd.id = 'sharebox';
+  bd.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:20;background:rgba(3,4,8,0.82);display:flex;align-items:center;justify-content:center;' +
+    'padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));' +
+    'font-family:system-ui,sans-serif;color:#e6ecff;-webkit-user-select:text;user-select:text;touch-action:manipulation';
+  const panel = document.createElement('div');
+  panel.style.cssText = 'background:#141a28;border:1px solid #3a4560;border-radius:12px;padding:16px;width:min(420px,100%);box-sizing:border-box;text-align:center';
+  const msg = document.createElement('div'); msg.textContent = 'Copy this link to share Project Vacuum:'; msg.style.cssText = 'font-size:15px;margin-bottom:10px';
+  const inp = document.createElement('input'); inp.type = 'text'; inp.readOnly = true; inp.value = SHARE.url; inp.setAttribute('aria-label', 'Game link');
+  inp.style.cssText = 'width:100%;box-sizing:border-box;font-size:16px;padding:10px;border-radius:8px;border:1px solid #5a6a90;background:#0c101a;color:#ffd23c;-webkit-user-select:text;user-select:text';
+  const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'Close';
+  btn.style.cssText = 'margin-top:12px;min-height:44px;min-width:96px;font-size:16px;border-radius:8px;border:1px solid #8fa0c8;background:#202a40;color:#e6ecff';
+  btn.addEventListener('click', e => { e.stopPropagation(); hideUrlBox(); });
+  bd.addEventListener('click', e => { if (e.target === bd) hideUrlBox(); });
+  panel.appendChild(msg); panel.appendChild(inp); panel.appendChild(btn); bd.appendChild(panel); document.body.appendChild(bd); share.box = bd;
+  try { inp.focus({ preventScroll: true }); inp.select(); inp.setSelectionRange(0, SHARE.url.length); } catch (e) {}
+}
+function shareFallback() { // copy the link, tell the user; if even that fails show it so they can copy by hand
+  const fail = () => { if (copyViaTextarea(SHARE.url)) shareToast('Link copied!'); else showUrlBox(); };
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      const p = navigator.clipboard.writeText(SHARE.url);
+      if (p && typeof p.then === 'function') { p.then(() => shareToast('Link copied!'), fail); return; }
+      shareToast('Link copied!'); return;
+    }
+  } catch (e) {}
+  fail();
+}
+function doShare() {
+  if (share.busy) return; share.busy = true; setTimeout(() => { share.busy = false; }, 600);
+  const data = { title: SHARE.title, text: SHARE.text, url: SHARE.url };
+  try {
+    if (navigator.share && (typeof navigator.canShare !== 'function' || navigator.canShare(data))) {
+      const p = navigator.share(data);
+      if (p && typeof p.then === 'function') p.then(() => {}, err => { if (!(err && err.name === 'AbortError')) shareFallback(); }); // user cancel = silent
+      return;
+    }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  shareFallback();
+}
+function drawShareBtn() {
+  const k = Math.max(1, 0.9 / viewScale), h = Math.max(30, 44 / viewScale), pressed = share.down !== null; // k: on small screens (viewScale < 1) draw bigger so it reads as ~14 css px text
+  ctx.font = 'bold ' + (15 * k) + 'px system-ui,sans-serif'; ctx.textAlign = 'left';
+  const label = 'Share', tw = ((ctx.measureText(label) || {}).width) || 44, w = tw + 54 * k;
+  const x1 = VX0 + VW - Math.max(10, 12 / viewScale) - safe.r / viewScale, yb = VY0 + VH - Math.max(4, 8 / viewScale) - safe.b / viewScale, y = yb - h;
+  share.btn = { x: x1 - w, y, w, h };
+  rrPath(x1 - w, y, w, h, h / 2); ctx.fillStyle = pressed ? 'rgba(110,170,255,0.50)' : 'rgba(90,150,255,0.22)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(150,190,255,0.9)'; ctx.lineWidth = 1.5 * k; ctx.stroke();
+  const ix = x1 - w + 20 * k, iy = y + h / 2; // share icon: three nodes joined by two lines
+  ctx.strokeStyle = '#d8e6ff'; ctx.fillStyle = '#d8e6ff'; ctx.lineWidth = 1.6 * k;
+  ctx.beginPath(); ctx.moveTo(ix - 5 * k, iy); ctx.lineTo(ix + 5 * k, iy - 6 * k); ctx.moveTo(ix - 5 * k, iy); ctx.lineTo(ix + 5 * k, iy + 6 * k); ctx.stroke();
+  for (const [dx, dy] of [[-5, 0], [5, -6], [5, 6]]) { ctx.beginPath(); ctx.arc(ix + dx * k, iy + dy * k, 3 * k, 0, TAU); ctx.fill(); }
+  ctx.fillStyle = '#e6ecff'; ctx.textBaseline = 'alphabetic'; ctx.fillText(label, x1 - w + 34 * k, iy + 5 * k);
+  if (performance.now() < share.until) { // brief toast above the button
+    ctx.font = 'bold ' + (14 * k) + 'px system-ui,sans-serif'; const mw = (((ctx.measureText(share.toast) || {}).width) || 90) + 24 * k, mh = 30 * k, my = y - mh - 8 * k;
+    rrPath(x1 - mw, my, mw, mh, mh / 2); ctx.fillStyle = 'rgba(20,40,28,0.95)'; ctx.fill(); ctx.strokeStyle = 'rgba(143,227,160,0.9)'; ctx.lineWidth = 1.5 * k; ctx.stroke();
+    ctx.fillStyle = '#b8f5c8'; ctx.textAlign = 'center'; ctx.fillText(share.toast, x1 - mw / 2, my + mh / 2 + 5 * k); ctx.textAlign = 'left';
+  }
+}
 function drawChangelog(t) {
   clogLayout(); clogWrap();
   ctx.fillStyle = 'rgba(3,4,8,0.88)'; ctx.fillRect(VX0 - 2, VY0 - 2, VW + 4, VH + 4);
@@ -1378,11 +1460,12 @@ function keyCode(e) {
   return KEYFALLBACK[k] || e.code || '';
 }
 let keyboardSeen = false, pausedByBlur = false;
-function focusGame() { try { window.focus(); if (document.body && document.body.focus) document.body.focus({ preventScroll: true }); canvas.focus({ preventScroll: true }); } catch (e) {} }
+function focusGame() { if (share.box) return; try { window.focus(); if (document.body && document.body.focus) document.body.focus({ preventScroll: true }); canvas.focus({ preventScroll: true }); } catch (e) {} }
 function resumeGame() { if (paused) { paused = false; pausedByBlur = false; last = performance.now(); } }
 function onKeyDown(e) {
   if (e.__vacHandled) return; e.__vacHandled = true;       // window + document capture both fire: handle once
   const code = keyCode(e);
+  if (share.box) { if (code === 'Escape') { e.preventDefault(); hideUrlBox(); } return; } // the link box is modal: typing / Ctrl+C go to it, never to the game
   if (!keyboardSeen) { keyboardSeen = true; }
   if (clog.open) { // changelog panel is modal: it handles its own keys and never starts / controls the game
     e.preventDefault();
@@ -1431,7 +1514,7 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // test hook (used by headless checks)
-window.__vac = { VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb };
+window.__vac = { VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb };
 })();
 </script>
 </body>
