@@ -56,6 +56,6 @@ Lethal contact: Roach, a lunging Spider, and a *charging* Beetle. Wasp stingers 
 4. Add real art, SFX/music, juice, and gamepad support. (Touch controls are in; they need playtesting on a real iPhone.)
 5. Add daily seeds and a leaderboard, then put up an itch.io web build and gather wishlist data before deciding on Steam.
 
-**Version history:** see `CHANGELOG.md` (current build v0.18.3; the version is shown as a tappable 'vX.Y.Z - changelog' label on the start and game-over screens, which opens an in-game changelog panel, and it is saved in each run record). Published at https://silvertibby.github.io/project-vacuum/ (GitHub Pages).
+**Version history:** see `CHANGELOG.md` (current build v0.19.1; the version is shown as a tappable 'vX.Y.Z - changelog' label on the start and game-over screens, which opens an in-game changelog panel, and it is saved in each run record). Published at https://silvertibby.github.io/project-vacuum/ (GitHub Pages).
 
 **App mode (iPhone):** open the Pages URL in Safari, then Share > Add to Home Screen. The game gets its own bug-themed icon, the name "Vacuum", and launches full screen with no browser bar (the icon and a web manifest are embedded in the single HTML file; safe areas, no bounce / pull-to-refresh / text selection / double-tap zoom). Not yet verified on a real iPhone.
