@@ -31,12 +31,13 @@
 <body>
 <div id="safe"></div>
 <canvas id="c" width="900" height="700" tabindex="0"></canvas>
-<script>// Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
+<script>
+// Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
 (() => {
 'use strict';
-const VERSION = '0.18.2'; // keep in sync with CHANGELOG.md
+const VERSION = '0.18.3'; // keep in sync with CHANGELOG.md
 // Shared online leaderboard (Cloudflare Worker, see leaderboard/README.md). '' = offline: local best only, no network calls.
-// Set to the Worker URL, e.g. 'https://project-vacuum-leaderboard.<subdomain>.workers.dev' (no trailing slash), to show the Top 10 on game over.
+// Set to the Worker URL, e.g. 'https://project-vacuum-leaderboard.<subdomain>.workers.dev' (no trailing slash), to show High Scores on title + game over.
 const LEADERBOARD_URL = 'https://project-vacuum-leaderboard.silvertibby.workers.dev';
 const W = 900, H = 700, CX = W / 2, CY = H / 2;   // CX,CY = centre of the arena AND the filter (the arena itself is a rounded RECTANGLE sized to the screen, see setArena)
 let AW = 760, AH = 540, AX0 = CX - 380, AX1 = CX + 380, AY0 = CY - 270, AY1 = CY + 270; // arena rect in world units (updated by computeLayout)
@@ -70,10 +71,10 @@ const T = {
   bugNear: 0.9, bugNearR: 190,                                // bug pull x(1 + 0.9 * (190 - d) / 190) near the core
   bugFleeK: 1.3,                                              // flee speed = 1.3 x base pull (x mass, x envelope)
   // v0.18 CANISTER EMPTY: a rare, telegraphed all-clear wipe. First at 55-70 s, then every 50-70 s (never during / right before a pulse:
-  // it waits for the pulse to end + pulseGap). 4.2 s telegraph (rumble, EMPTYING..., one flashing GREEN safe spot on the far side from the player,
+  // it waits for the pulse to end + pulseGap). 5.2 s telegraph (rumble, EMPTYING..., one flashing GREEN safe spot on the far side from the player,
   // within `reach` px so it can be reached). Then everything outside the spot is wiped (bugs, dust, webs, stingers); the player dies outside it.
   // Surviving = +150 score. Then a HEAVY refill: min(40, 10 + t/8) bugs spawned as if 60 s later in the run (tougher), plus dust, over 2.5 s.
-  empty: { first0: 55, first1: 70, gap0: 50, gap1: 70, warn: 4.2, safeR: 64, inset: 48, reach: 720, pulseGap: 2.5, after: 1.2,
+  empty: { first0: 55, first1: 70, gap0: 50, gap1: 70, warn: 5.2, safeR: 64, inset: 48, reach: 720, pulseGap: 2.5, after: 1.2,
     refillBase: 10, refillPerS: 1 / 8, refillMax: 40, refillLvl: 60, refillDur: 2.5, refillClumps: 5, refillKeep: 220 },
   // SCATTER (gentle): a pulse slides every dust clump and every web CLUSTER 60-150 px to a new spot over ~1.5-2 s (eased, no bouncing). Webs within
   // webLinkR of each other move together as one rigid unit. Targets are validated up front (arena, outside the max danger zone, off the player spawn).
@@ -432,12 +433,12 @@ function startEmpty() {
   const minPulse = G.t + E.warn + E.after + E.refillDur + 1 + T.warn; if (G.nextPulseAt < minPulse) G.nextPulseAt = minPulse;
   G.shake = Math.max(G.shake, 3); G.rumbleT = 0; beep(55, 0.9, 'sawtooth', 0.09); beep(82, 0.6, 'square', 0.04);
 }
-function inSafe(x, y) { const S = G.empty || G.emptyFx; return !!S && hyp(x - S.x, y - S.y) <= S.r; }
+function inSafe(x, y, r) { const S = G.empty || G.emptyFx; return !!S && hyp(x - S.x, y - S.y) < S.r + (r || 0); } // any-overlap: distance < safeR + bodyR (center-only when r omitted)
 function doEmpty() {
-  const E = T.empty, S = G.empty, p = G.player, safeP = inSafe(p.x, p.y);
+  const E = T.empty, S = G.empty, p = G.player, safeP = inSafe(p.x, p.y, p.r); // player safe if ANY part of the circle intersects the green spot
   for (const b of G.bugs) {
     if (b.dead) continue;
-    if (b.type === 'moth' && b.bonded) { if (safeP) continue; }        // your escort lives or goes with you
+    if (b.type === 'moth' && b.bonded) { if (safeP) continue; }        // bonded moths live/die with the player (overlap-safe)
     else if (inSafe(b.x, b.y)) continue;                               // bugs that made it into the green spot survive too
     b.dead = true; b.hp = 0; G.emptiedBugs++;
     const ty = G.tally[b.type]; if (ty) ty.emptied = (ty.emptied || 0) + 1;
@@ -1367,37 +1368,46 @@ function render(t) {
 
   if (paused && G.phase === 'play') overlay({ y: 330, items: [{ t: 'PAUSED', f: 'bold 48px system-ui,sans-serif', h: 40 }, { t: pausedByBlur ? 'Window lost focus. Click here or press any key to resume' : (touchMode ? 'tap to resume' : 'press P, any key, or click to resume'), f: '16px system-ui,sans-serif', h: 20, c: '#9fb0d8' }] });
   if (G.phase === 'ready') {
-    overlay({ y: 118, items: [
-      { t: 'PROJECT VACUUM', f: 'bold 52px system-ui,sans-serif', h: 42, c: '#ff6a50' },
-      { t: 'You are a bug inside a vacuum canister. You cannot fight. Survive.', f: '17px system-ui,sans-serif', h: 24 },
-      { t: 'A VACUUM PULSE swells the filter and drags everyone in: lure a bug close to the core and the suction beats its flee.', f: '14px system-ui,sans-serif', h: 20, c: '#9fb0d8' },
-      { t: 'Rarely the canister is EMPTIED: race to the flashing GREEN spot or be wiped. Then a heavy refill drops in.', f: '14px system-ui,sans-serif', h: 20, c: '#9fb0d8' },
-      { t: 'Lure bugs into each other: stingers and Beetle charges hit whatever is in the way.', f: '14px system-ui,sans-serif', h: 18, c: '#9fb0d8' },
-    ] });
-    drawLegend(288);
-    ctx.textAlign = 'center'; ctx.fillStyle = '#ffd23c'; ctx.font = 'bold 22px system-ui,sans-serif';
-    ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t * 5); ctx.fillText(touchMode ? 'TAP to start' : 'Press SPACE or a move key to start', CX, 560); ctx.globalAlpha = 1;
-    ctx.fillStyle = '#8fa0c8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText(touchMode ? 'Drag to move, tap DASH (brief invulnerability)' : 'WASD / Arrows = move     Space = dash (brief invulnerability)     R = restart', CX, 592);
-    if (best > 0) { ctx.fillStyle = '#ffd23c'; ctx.fillText('Best: ' + best.toFixed(1) + 's', CX, 620); }
-    ctx.font = '12px system-ui,sans-serif'; ctx.textAlign = 'center';
-    if (!keyboardSeen && !touchMode) { ctx.fillStyle = `rgba(255,210,60,${0.55 + 0.35 * Math.sin(t * 4)})`; ctx.fillText('Click the game to focus it, then use the keyboard', CX, 644); }
-    else if (keyboardSeen) { ctx.fillStyle = 'rgba(140,200,160,0.55)'; ctx.fillText('keys: ok', CX, 644); }
-    drawVerLabel(); drawShareBtn(); ctx.textAlign = 'center';
-  }
+    if (!lbOnTitle()) {
+      overlay({ y: 118, items: [
+        { t: 'PROJECT VACUUM', f: 'bold 52px system-ui,sans-serif', h: 42, c: '#ff6a50' },
+        { t: 'You are a bug inside a vacuum canister. You cannot fight. Survive.', f: '17px system-ui,sans-serif', h: 24 },
+        { t: 'A VACUUM PULSE swells the filter and drags everyone in: lure a bug close to the core and the suction beats its flee.', f: '14px system-ui,sans-serif', h: 20, c: '#9fb0d8' },
+        { t: 'Rarely the canister is EMPTIED: race to the flashing GREEN spot or be wiped. Then a heavy refill drops in.', f: '14px system-ui,sans-serif', h: 20, c: '#9fb0d8' },
+        { t: 'Lure bugs into each other: stingers and Beetle charges hit whatever is in the way.', f: '14px system-ui,sans-serif', h: 18, c: '#9fb0d8' },
+      ] });
+      drawLegend(288);
+      ctx.textAlign = 'center'; ctx.fillStyle = '#ffd23c'; ctx.font = 'bold 22px system-ui,sans-serif';
+      ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t * 5); ctx.fillText(touchMode ? 'TAP to start' : 'Press SPACE or a move key to start', CX, 560); ctx.globalAlpha = 1;
+      ctx.fillStyle = '#8fa0c8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText(touchMode ? 'Drag to move, tap DASH (brief invulnerability)' : 'WASD / Arrows = move     Space = dash (brief invulnerability)     R = restart', CX, 592);
+      if (best > 0) { ctx.fillStyle = '#ffd23c'; ctx.fillText('Best: ' + best.toFixed(1) + 's', CX, 620); }
+      ctx.font = '12px system-ui,sans-serif'; ctx.textAlign = 'center';
+      if (!keyboardSeen && !touchMode) { ctx.fillStyle = `rgba(255,210,60,${0.55 + 0.35 * Math.sin(t * 4)})`; ctx.fillText('Click the game to focus it, then use the keyboard', CX, 644); }
+      else if (keyboardSeen) { ctx.fillStyle = 'rgba(140,200,160,0.55)'; ctx.fillText('keys: ok', CX, 644); }
+    } else {
+      // High Scores panel open: dim the title underneath
+      ctx.fillStyle = 'rgba(5,6,10,0.78)'; ctx.fillRect(VX0 - 2, VY0 - 2, VW + 4, VH + 4);
+    }
+    drawLbBtn(); drawVerLabel(); drawShareBtn(); ctx.textAlign = 'center';
+  } else { lbBtn = null; }
   if (G.phase === 'dead' && G.deathT > 0.5) {
-    const lbp = lbVisible() ? lbPlace() : null;
-    overlay({ y: 220, cx: lbp && lbp.cx, maxW: lbp && lbp.maxW, items: [
-      { t: 'GAME OVER', f: 'bold 54px system-ui,sans-serif', h: 44, c: '#ff6a50' },
-      { t: G.cause, f: '18px system-ui,sans-serif', h: 40, c: '#ffb0a0' },
-      { t: 'You survived ' + G.t.toFixed(1) + 's', f: 'bold 30px system-ui,sans-serif', h: 36 },
-      { t: G.newBest ? 'NEW BEST!' : 'Best: ' + best.toFixed(1) + 's', f: 'bold 20px system-ui,sans-serif', h: 30, c: '#ffd23c' },
-      { t: 'Pulses survived: ' + G.pulseN + '   Empties survived: ' + G.empties + '   Bugs lured to death: ' + G.lureKills + '   Bugs lost to the filter: ' + G.sucked, f: '15px system-ui,sans-serif', h: 26, c: '#9fb0d8' },
-      { t: 'Webs broken: ' + websBroken() + ' (you ' + G.websPlayer + ', bugs ' + G.websBugs + ')   Bugs killed: ' + G.bugsKilled, f: '15px system-ui,sans-serif', h: 34, c: '#9fb0d8' },
-      { t: 'Score: ' + G.score + ' (provisional)' + (G.newBestScore ? '  NEW BEST SCORE!' : '   Best score: ' + Math.floor(bestScore)), f: 'bold 20px system-ui,sans-serif', h: 36, c: '#8fe3a0' },
-      { t: touchMode ? 'TAP to restart' : 'Press R to restart', f: 'bold 22px system-ui,sans-serif', h: 24, c: '#e6ecff' },
-    ] });
+    if (lbOnDead()) {
+      // High-score board replaces the game-over screen (panel drawn in DOM via lbSync).
+      ctx.fillStyle = 'rgba(5,6,10,0.78)'; ctx.fillRect(VX0 - 2, VY0 - 2, VW + 4, VH + 4);
+    } else {
+      overlay({ y: 220, items: [
+        { t: 'GAME OVER', f: 'bold 54px system-ui,sans-serif', h: 44, c: '#ff6a50' },
+        { t: G.cause, f: '18px system-ui,sans-serif', h: 40, c: '#ffb0a0' },
+        { t: 'You survived ' + G.t.toFixed(1) + 's', f: 'bold 30px system-ui,sans-serif', h: 36 },
+        { t: G.newBest ? 'NEW BEST!' : 'Best: ' + best.toFixed(1) + 's', f: 'bold 20px system-ui,sans-serif', h: 30, c: '#ffd23c' },
+        { t: 'Pulses survived: ' + G.pulseN + '   Empties survived: ' + G.empties + '   Bugs lured to death: ' + G.lureKills + '   Bugs lost to the filter: ' + G.sucked, f: '15px system-ui,sans-serif', h: 26, c: '#9fb0d8' },
+        { t: 'Webs broken: ' + websBroken() + ' (you ' + G.websPlayer + ', bugs ' + G.websBugs + ')   Bugs killed: ' + G.bugsKilled, f: '15px system-ui,sans-serif', h: 34, c: '#9fb0d8' },
+        { t: 'Score: ' + G.score + ' (provisional)' + (G.newBestScore ? '  NEW BEST SCORE!' : '   Best score: ' + Math.floor(bestScore)), f: 'bold 20px system-ui,sans-serif', h: 36, c: '#8fe3a0' },
+        { t: touchMode ? 'TAP to restart' : 'Press R to restart', f: 'bold 22px system-ui,sans-serif', h: 24, c: '#e6ecff' },
+      ] });
+    }
+    drawVerLabel(); drawShareBtn();
   }
-  if (G.phase === 'dead' && G.deathT > 0.5) { drawVerLabel(); drawShareBtn(); }
   if (G.phase === 'play' || (G.phase === 'dead' && G.deathT <= 0.5)) verBtn = null;
   if (G.phase !== 'ready' && !(G.phase === 'dead' && G.deathT > 0.5)) { share.btn = null; share.down = null; }
   if (clog.open) drawChangelog(t); else clog.panel = null;
@@ -1459,8 +1469,9 @@ function setupTouch() {
     }
     if (verBtn && (G.phase === 'ready' || (G.phase === 'dead' && G.deathT > 0.5)) && !paused) { const [lx, ly] = toLogical(x, y); if (inRect(verBtn, lx, ly)) { openClog(); return; } }
     if (share.btn && (G.phase === 'ready' || (G.phase === 'dead' && G.deathT > 0.5)) && !paused) { const [lx, ly] = toLogical(x, y); if (inRect(share.btn, lx, ly)) { share.down = e.pointerId; return; } } // fires on release (iOS needs a real tap-up for navigator.share)
+    if (lbBtn && G.phase === 'ready' && !paused) { const [lx, ly] = toLogical(x, y); if (inRect(lbBtn, lx, ly)) { lbToggleTitle(); return; } }
     if (paused) { resumeGame(); return; }
-    if (G.phase === 'ready') { G.phase = 'play'; if (!isTouch) return; }
+    if (G.phase === 'ready') { if (lb.titleOpen) { lb.titleOpen = false; return; } lb.titleOpen = false; G.phase = 'play'; if (!isTouch) return; }
     else if (G.phase === 'dead') { if (G.deathT > 0.6) { startRun(); paused = false; touchReset(); } return; }
     if (!isTouch) return;
     if (hyp(x - L.pause.x, y - L.pause.y) < L.pause.r + 12) { paused = true; touch.pauseId = e.pointerId; return; }
@@ -1502,14 +1513,19 @@ function setupTouch() {
 
 // ---------- in-game changelog (condensed from CHANGELOG.md; newest first). '## ' = version heading, '- ' = bullet ----------
 const CHANGELOG = [
+  '## v0.18.3 - 2026-10-04 (~23:45 PT)',
+  '- Title screen: High Scores button opens a clean Top 10 (fetched when the title shows). Offline / failed fetch hides it or shows offline.',
+  '- Game over: when the shared board is on, a clean High Scores panel replaces the old game-over screen (name + submit + play again). No more CRT / arcade side card.',
+  '- Empty safe zone: you (and bonded moths with you) are safe if ANY part of your circle overlaps the green spot (distance < safeR + player.r), not center-only.',
+  '- Empty telegraph is 5.2 s (was 4.2 s). Empty timing gaps unchanged (first 55-70 s, then 50-70 s, delay if pulse).',
   '## v0.18.2 - 2026-10-04 (~23:40 PT)',
-  '- Shared HIGH SCORES now rank by survival time (longest first), shown arcade-style as 1ST  BEN  01:42.3. Score is still sent and kept, just not used for ranking.',
+  '- Shared HIGH SCORES now rank by survival time (longest first), shown as 1st  Ben  01:42.3. Score is still sent and kept, just not used for ranking.',
   '## v0.18.1 - 2026-10-04 (~23:20 PT)',
-  '- Shared arcade Top 10 is now ON: the game-over HIGH SCORES card talks to the live leaderboard Worker. No gameplay changes.',
+  '- Shared Top 10 is now ON: the game-over High Scores panel talks to the live leaderboard Worker. No gameplay changes.',
   '## v0.18.0 - 2026-10-04 (~23:30 PT)',
   '- Stronger filter pulse (risk / reward): bugs are dragged ~2.3x harder toward the filter (and much harder close to the core). During a pulse EVERY bug (Roach too) flees radially away from the filter; far out they mostly escape, but if you lure one near the core the suction wins and it dies. Bonded Moths stay with you. Roach chase AI itself is unchanged.',
   '- Canister EMPTY: a rare, telegraphed all-clear wipe (first ~55-70 s, then every ~50-70 s; never during a pulse). Rumble, EMPTYING..., one flashing GREEN safe spot on the far side of the arena. Everything outside the spot is wiped; you die if you miss it. Surviving = +150. Then a HEAVY refill of high-level bugs drops in (late-game difficulty stays high, not a quiet reset).',
-  '- Old-arcade Top 10 on game over (once the free Cloudflare Worker in leaderboard/ is switched on): HIGH SCORES, 1ST BEN 004850 style ranks, flashing ENTER YOUR INITIALS. Off by default; offline mode unchanged.',
+  '- Shared Top 10 on game over (once the free Cloudflare Worker in leaderboard/ is switched on). Off by default; offline mode unchanged.',
   '## v0.17.0 - 2026-10-04 (~21:50 PT)',
   '- You stand out: the player is a white bug with a saturated cyan rim and glow (nothing else uses it), on a dark contrast plate with an always-on halo ring, and it is drawn on top of everything. Particles fade right around you, and a small cyan arrow points at you when you are crowded.',
   '- Dashing leaves a bright trail from where you started to where you landed, then a white flash and an expanding ring at the landing spot.',
@@ -1674,120 +1690,211 @@ function drawShareBtn() {
     ctx.fillStyle = '#b8f5c8'; ctx.textAlign = 'center'; ctx.fillText(share.toast, x1 - mw / 2, my + mh / 2 + 5 * k); ctx.textAlign = 'left';
   }
 }
-// ---------- shared leaderboard (game-over card; only when LEADERBOARD_URL is set) ----------
+// ---------- shared leaderboard (clean modern panel; only when LEADERBOARD_URL is set) ----------
 // Ranked by SURVIVAL TIME (longest first); score etc. are submitted and stored for display only.
-// GET  {url}/board -> [{name, time, score, lured, webs, pulses, empties, ver, at}] (top 10);  POST {url}/score {name, time, score, lured, webs, ver, pulses, empties} -> {ok, rank, improved, top}
-// A small DOM card beside / below the game-over text: name field (remembered), Submit, Top 10 times. Network failures show a toast and never block a restart.
+// GET  {url}/board -> [{name, time, score, ...}] (top 10);  POST {url}/score {...} -> {ok, rank, improved, top}
+// Game over: the high-score board REPLACES the game-over screen (name + submit kept). Title: a High Scores
+// button opens the same clean Top 10 panel (view-only). Offline URL or a failed fetch -> hide / show "offline".
 const LB_NAME_RE = /^[A-Za-z0-9 _-]{1,16}$/;
-const lb = { url: String(LEADERBOARD_URL || '').replace(/\/+$/, ''), card: null, els: null, board: null, forG: null, submitted: false, busy: false, mine: null, status: '', place: '' };
+const lb = { url: String(LEADERBOARD_URL || '').replace(/\/+$/, ''), card: null, els: null, board: null, forG: null,
+  submitted: false, busy: false, mine: null, status: '', place: '', mode: '', titleOpen: false, offline: false, fetched: false };
 function inUiBox(t) { return !!t && ((share.box && share.box.contains(t)) || (lb.card && lb.card.contains(t))); }
 function lbOnline() { return !!lb.url && typeof fetch === 'function' && typeof document.createElement === 'function'; }
-function lbVisible() { return lbOnline() && G.phase === 'dead' && G.deathT > 0.5 && !clog.open && !share.box; }
+function lbOnDead() { return lbOnline() && G.phase === 'dead' && G.deathT > 0.5 && !clog.open && !share.box; }
+function lbOnTitle() { return lbOnline() && G.phase === 'ready' && lb.titleOpen && !clog.open && !share.box; }
+function lbVisible() { return lbOnDead() || lbOnTitle(); }
+function lbCanSubmit() { return lbOnDead(); }
 function lbFetch(path, opts) {
   const ctl = typeof AbortController === 'function' ? new AbortController() : null, tm = ctl ? setTimeout(() => ctl.abort(), 7000) : 0;
   return fetch(lb.url + path, Object.assign({ cache: 'no-store', signal: ctl ? ctl.signal : undefined }, opts || {}))
     .then(r => r.json().catch(() => null).then(j => { clearTimeout(tm); return { status: r.status, j }; }), e => { clearTimeout(tm); throw e; });
 }
-function lbFail() { lb.status = "Couldn't reach leaderboard"; shareToast("Couldn't reach leaderboard"); lbRender(); }
-function lbLoad() {
-  lb.status = 'Loading Top 10...'; lbRender();
-  lbFetch('/board').then(({ status, j }) => { if (status !== 200 || !Array.isArray(j)) return lbFail(); lb.board = j; lb.status = j.length ? '' : 'No scores yet - be the first!'; lbRender(); }, lbFail);
+function lbFail() {
+  lb.offline = true; lb.status = 'offline'; lb.fetched = true;
+  if (lbOnTitle()) { lb.titleOpen = false; } // title: hide on fail
+  shareToast(lbOnDead() ? "Couldn't reach leaderboard" : 'Leaderboard offline');
+  lbRender();
+}
+function lbLoad(force) {
+  if (!lbOnline()) return;
+  if (lb.fetched && !force && !lb.offline) { lbRender(); return; }
+  lb.offline = false; lb.status = 'Loading Top 10...'; lbRender();
+  lbFetch('/board').then(({ status, j }) => {
+    if (status !== 200 || !Array.isArray(j)) return lbFail();
+    lb.board = j; lb.offline = false; lb.fetched = true;
+    lb.status = j.length ? '' : 'No scores yet — be the first!';
+    lbRender();
+  }, lbFail);
 }
 function lbSubmit() {
-  if (!lb.els || lb.submitted || lb.busy || !lbVisible()) return;
+  if (!lb.els || lb.submitted || lb.busy || !lbCanSubmit()) return;
   const name = lb.els.name.value.trim().replace(/\s+/g, ' ');
-  if (!LB_NAME_RE.test(name)) { lb.status = 'Name: 1-16 letters, digits, space, _ or -'; lbRender(); return; }
+  if (!LB_NAME_RE.test(name)) { lb.status = 'Name: 1–16 letters, digits, space, _ or -'; lbRender(); return; }
   try { localStorage.setItem('vacuum_name', name); } catch (e) {}
   const g = G, body = { name, score: g.score, time: +g.t.toFixed(1), lured: g.lureKills, webs: websBroken(), ver: VERSION, pulses: g.pulseN, empties: g.empties || 0 };
   lb.busy = true; lb.status = 'Submitting...'; lbRender();
-  lbFetch('/score', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body) }).then(({ status, j }) => { // text/plain: no CORS preflight
+  lbFetch('/score', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body) }).then(({ status, j }) => {
     lb.busy = false; if (G !== g) return;
     if (status === 200 && j && j.ok) {
       lb.submitted = true; lb.mine = { name, time: body.time }; if (Array.isArray(j.top)) lb.board = j.top;
-      lb.status = j.rank ? 'You are #' + j.rank + ' on the board!' : (j.improved === false && j.top && j.top.some(x => String(x.name).toLowerCase() === name.toLowerCase()) ? 'Submitted - your best time under that name is still longer.' : 'Submitted - not in the Top 10 this time.');
-    } else if (status === 429) lb.status = 'Too many submissions - try again in a minute.';
+      lb.status = j.rank ? 'You are #' + j.rank + ' on the board!' : (j.improved === false && j.top && j.top.some(x => String(x.name).toLowerCase() === name.toLowerCase()) ? 'Submitted — your best time under that name is still longer.' : 'Submitted — not in the Top 10 this time.');
+    } else if (status === 429) lb.status = 'Too many submissions — try again in a minute.';
     else if (status >= 400 && status < 500) { lb.status = 'Run rejected' + (j && j.error ? ': ' + j.error : ''); lb.submitted = true; }
     else return lbFail();
     lbRender();
   }, () => { lb.busy = false; if (G === g) lbFail(); });
 }
-const lbOrd = i => (['1ST','2ND','3RD','4TH','5TH','6TH','7TH','8TH','9TH','10TH'][i] || String(i + 1));
+const lbOrd = i => (['1st','2nd','3rd','4th','5th','6th','7th','8th','9th','10th'][i] || String(i + 1));
 const lbPad = (n, w) => { const t = String(Math.max(0, Math.floor(+n || 0))); return t.length >= w ? t : ('0000000000' + t).slice(-w); };
-// survival time as an arcade clock: 102.3 -> '01:42.3' (minutes keep growing past 99)
 const lbTime = s => { const d = Math.max(0, Math.round((+s || 0) * 10)), m = Math.floor(d / 600), r = d - m * 600; return lbPad(m, 2) + ':' + lbPad(Math.floor(r / 10), 2) + '.' + (r % 10); };
 function lbBuild() {
-  // Old-arcade High Scores card: monospace / CRT neon panel. Readable on phone; the layout / placement / offline behaviour are unchanged.
+  // Clean modern panel matching the rest of the UI (system-ui, soft panels, no CRT neon).
   const card = document.createElement('div'); card.id = 'lbcard';
-  card.style.cssText = 'position:fixed;z-index:15;box-sizing:border-box;padding:12px 12px 10px;border-radius:10px;' +
-    'background:linear-gradient(180deg,rgba(8,14,22,0.98),rgba(4,8,14,0.98));border:2px solid #2ff3ff;' +
-    'box-shadow:0 0 18px rgba(47,243,255,0.28), inset 0 0 40px rgba(47,243,255,0.05);' +
-    'color:#e6ecff;font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y';
-  const hd = document.createElement('div'); hd.textContent = 'HIGH SCORES';
-  hd.style.cssText = 'font-weight:bold;font-size:18px;letter-spacing:0.18em;text-align:center;color:#ffd23c;' +
-    'text-shadow:0 0 8px rgba(255,210,60,0.55);margin-bottom:4px';
-  const sub = document.createElement('div'); sub.textContent = 'TOP 10 - SURVIVAL TIME';
-  sub.style.cssText = 'text-align:center;font-size:11px;letter-spacing:0.35em;color:#8fa0c8;margin-bottom:8px';
-  const tip = document.createElement('div'); tip.textContent = 'ENTER YOUR INITIALS';
-  tip.style.cssText = 'text-align:center;font-size:12px;letter-spacing:0.12em;color:#7dff9a;margin-bottom:6px;' +
-    'animation:vacBlink 1.1s step-end infinite';
-  if (!document.getElementById('vacBlink')) { const stl = document.createElement('style'); stl.id = 'vacBlink';
-    stl.textContent = '@keyframes vacBlink{0%,100%{opacity:1}50%{opacity:0.15}}'; document.head.appendChild(stl); }
-  const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px';
-  const name = document.createElement('input'); name.type = 'text'; name.maxLength = 16; name.placeholder = 'AAA'; name.autocomplete = 'nickname'; name.setAttribute('aria-label', 'Your initials'); name.spellcheck = false;
+  card.style.cssText = 'position:fixed;z-index:15;box-sizing:border-box;padding:16px 16px 14px;border-radius:12px;' +
+    'background:rgba(16,21,31,0.97);border:1.5px solid #3a4560;' +
+    'box-shadow:0 12px 40px rgba(0,0,0,0.45);' +
+    'color:#e6ecff;font:14px system-ui,-apple-system,sans-serif;overflow:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y';
+  const hd = document.createElement('div'); hd.id = 'lbhd';
+  hd.style.cssText = 'font-weight:700;font-size:22px;text-align:center;color:#ff6a50;margin-bottom:4px;letter-spacing:0.02em';
+  const sub = document.createElement('div'); sub.id = 'lbsub';
+  sub.style.cssText = 'text-align:center;font-size:13px;color:#8fa0c8;margin-bottom:10px;line-height:1.35';
+  const tip = document.createElement('div'); tip.textContent = 'Enter your name to submit';
+  tip.style.cssText = 'text-align:center;font-size:13px;color:#8fe3a0;margin-bottom:8px';
+  const row = document.createElement('div'); row.id = 'lbrow'; row.style.cssText = 'display:flex;gap:8px;margin-bottom:8px';
+  const name = document.createElement('input'); name.type = 'text'; name.maxLength = 16; name.placeholder = 'Your name'; name.autocomplete = 'nickname'; name.setAttribute('aria-label', 'Your name'); name.spellcheck = false;
   try { name.value = localStorage.getItem('vacuum_name') || ''; } catch (e) {}
-  name.style.cssText = 'flex:1;min-width:0;font:16px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:8px;border-radius:6px;' +
-    'border:1px solid #2ff3ff;background:#05080f;color:#2ff3ff;text-transform:uppercase;letter-spacing:0.12em;-webkit-user-select:text;user-select:text';
-  const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'INSERT COIN';
-  btn.style.cssText = 'min-height:40px;font:bold 12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:0 10px;border-radius:6px;' +
-    'border:1px solid #ffd23c;background:#2a1e00;color:#ffd23c;white-space:nowrap;letter-spacing:0.06em';
+  name.style.cssText = 'flex:1;min-width:0;font:15px system-ui,sans-serif;padding:10px 12px;border-radius:8px;' +
+    'border:1px solid #3a4560;background:#0a0e16;color:#e6ecff;-webkit-user-select:text;user-select:text;outline:none';
+  name.addEventListener('focus', () => { name.style.borderColor = 'rgba(150,190,255,0.9)'; });
+  name.addEventListener('blur', () => { name.style.borderColor = '#3a4560'; });
+  const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'Submit';
+  btn.style.cssText = 'min-height:42px;font:bold 14px system-ui,sans-serif;padding:0 16px;border-radius:8px;' +
+    'border:1px solid rgba(150,190,255,0.9);background:rgba(90,150,255,0.22);color:#e6ecff;white-space:nowrap;cursor:pointer';
   btn.addEventListener('click', e => { e.stopPropagation(); lbSubmit(); });
-  const me = document.createElement('div'); me.id='lbme'; me.style.cssText = 'color:#8fa0c8;margin-bottom:4px;font-size:12px;letter-spacing:0.04em';
-  const st = document.createElement('div'); st.id='lbst'; st.style.cssText = 'color:#ffb0a0;min-height:16px;margin-bottom:6px;font-size:12px';
+  const me = document.createElement('div'); me.id = 'lbme'; me.style.cssText = 'color:#8fa0c8;margin-bottom:6px;font-size:13px;text-align:center';
+  const st = document.createElement('div'); st.id = 'lbst'; st.style.cssText = 'color:#ffb0a0;min-height:18px;margin-bottom:8px;font-size:13px;text-align:center';
+  const listHd = document.createElement('div'); listHd.textContent = 'Top 10 — survival time';
+  listHd.style.cssText = 'font-weight:600;font-size:12px;letter-spacing:0.06em;text-transform:uppercase;color:#8fa0c8;margin:4px 0 6px;';
   const list = document.createElement('ol'); list.style.cssText = 'margin:0;padding:0;list-style:none';
+  const close = document.createElement('button'); close.type = 'button'; close.id = 'lbclose'; close.textContent = 'Close';
+  close.style.cssText = 'display:none;width:100%;margin-top:10px;min-height:40px;font:bold 14px system-ui,sans-serif;' +
+    'border-radius:8px;border:1px solid #3a4560;background:rgba(143,160,200,0.12);color:#e6ecff;cursor:pointer';
+  close.addEventListener('click', e => { e.stopPropagation(); lb.titleOpen = false; focusGame(); });
+  const foot = document.createElement('div'); foot.id = 'lbfoot';
+  foot.style.cssText = 'text-align:center;font-size:12px;color:#8fa0c8;margin-top:8px';
+  const again = document.createElement('button'); again.type = 'button'; again.id = 'lbagain'; again.textContent = 'Play again';
+  again.style.cssText = 'display:none;width:100%;margin-top:8px;min-height:42px;font:bold 15px system-ui,sans-serif;' +
+    'border-radius:8px;border:1px solid rgba(255,210,60,0.85);background:rgba(255,210,60,0.16);color:#ffd23c;cursor:pointer';
+  again.addEventListener('click', e => { e.stopPropagation(); startRun(); paused = false; touchReset(); });
   row.appendChild(name); row.appendChild(btn);
-  for (const el of [hd, sub, tip, row, me, st, list]) card.appendChild(el);
+  for (const el of [hd, sub, tip, row, me, st, listHd, list, close, again, foot]) card.appendChild(el);
   for (const ev of ['pointerdown', 'pointerup', 'click', 'touchstart', 'touchend', 'wheel']) card.addEventListener(ev, e => e.stopPropagation());
-  document.body.appendChild(card); lb.card = card; lb.els = { name, btn, me, st, list, tip }; lb.place = '';
+  document.body.appendChild(card);
+  lb.card = card; lb.els = { name, btn, me, st, list, tip, row, hd, sub, close, foot, listHd, again }; lb.place = '';
 }
 function lbRender() {
   if (!lb.els) return;
-  const E = lb.els;
-  E.me.textContent = 'YOUR TIME  ' + lbTime(G.t) + '   BEST  ' + lbTime(best);
-  E.st.textContent = lb.status; E.st.style.color = /^You are #/.test(lb.status) ? '#8fe3a0' : '#ffb0a0';
+  const E = lb.els, dead = lbCanSubmit(), title = lbOnTitle();
+  E.hd.textContent = dead ? 'Game Over' : 'High Scores';
+  E.hd.style.color = dead ? '#ff6a50' : '#e6ecff';
+  if (dead) {
+    E.sub.textContent = (G.cause ? G.cause + ' · ' : '') + 'Survived ' + G.t.toFixed(1) + 's' + (G.newBest ? ' · New best!' : '') + ' · Score ' + G.score;
+    E.sub.style.display = '';
+  } else {
+    E.sub.textContent = best > 0 ? ('Your best: ' + best.toFixed(1) + 's') : 'Survive as long as you can';
+    E.sub.style.display = '';
+  }
+  E.me.textContent = dead ? ('Your time  ' + lbTime(G.t) + '    Best  ' + lbTime(best)) : '';
+  E.me.style.display = dead ? '' : 'none';
+  E.st.textContent = lb.offline ? 'offline' : lb.status;
+  E.st.style.color = lb.offline ? '#8fa0c8' : (/^You are #/.test(lb.status) ? '#8fe3a0' : '#ffb0a0');
+  const showForm = dead && !lb.offline;
+  E.tip.style.display = showForm && !lb.submitted ? '' : 'none';
+  E.row.style.display = showForm ? 'flex' : 'none';
   E.btn.disabled = lb.submitted || lb.busy; E.btn.style.opacity = E.btn.disabled ? '0.5' : '1';
-  E.btn.textContent = lb.submitted ? 'CREDITED' : lb.busy ? 'SENDING...' : 'INSERT COIN';
+  E.btn.textContent = lb.submitted ? 'Submitted' : lb.busy ? 'Sending…' : 'Submit';
   E.name.disabled = lb.submitted;
-  if (E.tip) E.tip.style.display = lb.submitted ? 'none' : '';
+  E.close.style.display = title ? '' : 'none';
+  E.again.style.display = dead ? '' : 'none';
+  E.foot.textContent = dead ? (touchMode ? 'Or tap outside the panel to restart' : 'Press R to restart') : '';
+  E.foot.style.display = dead ? '' : 'none';
   while (E.list.firstChild) E.list.removeChild(E.list.firstChild);
-  (lb.board || []).slice(0, 10).forEach((r, i) => {
-    const li = document.createElement('li'), mine = lb.mine && r.name === lb.mine.name && r.time === lb.mine.time;
-    li.style.cssText = 'display:flex;gap:8px;align-items:baseline;padding:3px 0;border-top:1px solid rgba(47,243,255,0.12);' +
-      'font-size:13px;letter-spacing:0.04em' + (mine ? ';color:#2ff3ff;font-weight:bold;text-shadow:0 0 6px rgba(47,243,255,0.55)' : ';color:#e6ecff');
-    const a = document.createElement('span'); a.textContent = lbOrd(i); a.style.cssText = 'width:36px;color:' + (i < 3 ? '#ffd23c' : '#8fa0c8');
-    const n = document.createElement('span'); n.textContent = String(r.name).toUpperCase(); // textContent: names are never parsed as HTML
-    n.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-    const sc = document.createElement('span'); sc.textContent = lbTime(r.time); sc.style.cssText = 'font-weight:bold;color:#7dff9a';
-    li.appendChild(a); li.appendChild(n); li.appendChild(sc); E.list.appendChild(li);
-  });
+  if (lb.offline && !(lb.board || []).length) {
+    const li = document.createElement('li'); li.textContent = 'offline'; li.style.cssText = 'text-align:center;color:#8fa0c8;padding:12px 0'; E.list.appendChild(li);
+  } else {
+    (lb.board || []).slice(0, 10).forEach((r, i) => {
+      const li = document.createElement('li'), mine = lb.mine && r.name === lb.mine.name && r.time === lb.mine.time;
+      li.style.cssText = 'display:flex;gap:10px;align-items:baseline;padding:6px 4px;border-top:1px solid rgba(58,69,96,0.55);' +
+        'font-size:14px' + (mine ? ';color:#8fe3a0;font-weight:600' : ';color:#e6ecff');
+      const a = document.createElement('span'); a.textContent = lbOrd(i); a.style.cssText = 'width:36px;color:' + (i < 3 ? '#ffd23c' : '#8fa0c8') + ';font-weight:600';
+      const n = document.createElement('span'); n.textContent = String(r.name); // textContent: names are never parsed as HTML
+      n.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+      const sc = document.createElement('span'); sc.textContent = lbTime(r.time); sc.style.cssText = 'font-weight:600;color:#8fe3a0;font-variant-numeric:tabular-nums';
+      li.appendChild(a); li.appendChild(n); li.appendChild(sc); E.list.appendChild(li);
+    });
+    if (!(lb.board || []).length && !lb.status && !lb.offline) {
+      const li = document.createElement('li'); li.textContent = 'No scores yet'; li.style.cssText = 'text-align:center;color:#8fa0c8;padding:12px 0'; E.list.appendChild(li);
+    }
+  }
 }
-// Card rect in CSS px + where the game-over text goes. Wide screens: card on the right, text centred in the space to its left. Tall screens: card below the text.
-// The bottom row (changelog label + Share button) always stays clear.
+// Centered panel. Game over: replaces the game-over screen. Title open: a modal over the start screen.
 function lbPlace() {
-  const L = safe.l + 10, R = cssW - safe.r - 10, Tt = safe.t + 10;
-  const B = cssH - safe.b - Math.max(4 * viewScale, 8) - Math.max(30 * viewScale, 44) - 8;
-  const availW = R - L, cw = Math.min(300, Math.max(230, availW * 0.32)), toL = x => VX0 + x / viewScale;
-  const textBottom = (510 - VY0) * viewScale, by = Math.max(Tt, textBottom + 8);
-  if (availW < 600 * viewScale + cw + 24 && B - by >= 170) { const w = Math.min(380, availW); return { x: L + (availW - w) / 2, y: by, w, h: Math.min(B - by, 440), cx: 0, maxW: 0 }; }
-  const x = R - cw, h = Math.min(B - Tt, 440), y = Tt + Math.max(0, (B - Tt - h) / 2), right = x - 12;
-  return { x, y, w: cw, h, cx: toL((L + right) / 2), maxW: Math.max(200, (right - L) / viewScale - 16) };
+  const L = safe.l + 12, R = cssW - safe.r - 12, Tt = safe.t + 12;
+  const B = cssH - safe.b - Math.max(4 * viewScale, 8) - Math.max(30 * viewScale, 44) - 10;
+  const availW = R - L, availH = Math.max(180, B - Tt);
+  const w = Math.min(lbOnDead() ? 420 : 380, availW), h = Math.min(lbOnDead() ? 560 : 480, availH);
+  return { x: L + (availW - w) / 2, y: Tt + Math.max(0, (availH - h) / 2), w, h, cx: 0, maxW: 0 };
 }
 function lbSync() {
-  if (!lbVisible()) { if (lb.card) { try { lb.card.remove(); } catch (e) {} lb.card = null; lb.els = null; } return; }
+  // Prefetch Top 10 when the title screen is up (even if the panel is closed).
+  if (lbOnline() && G.phase === 'ready' && !lb.fetched && !lb.offline) lbLoad();
+  if (!lbVisible()) {
+    if (lb.card) { try { lb.card.remove(); } catch (e) {} lb.card = null; lb.els = null; lb.place = ''; }
+    // Leaving game-over / title-open: keep board cache; reset per-run submit state when a new G starts.
+    return;
+  }
   if (!lb.card) lbBuild();
-  if (lb.forG !== G) { lb.forG = G; lb.submitted = false; lb.busy = false; lb.mine = null; lb.status = ''; lbLoad(); } else if (!lb.els.list.firstChild && !lb.status) lbRender();
-  const P = lbPlace(), key = [P.x, P.y, P.w, P.h].map(v => Math.round(v)).join(',');
-  if (key !== lb.place) { lb.place = key; const s = lb.card.style; s.left = Math.round(P.x) + 'px'; s.top = Math.round(P.y) + 'px'; s.width = Math.round(P.w) + 'px'; s.maxHeight = Math.round(P.h) + 'px'; lbRender(); }
+  const mode = lbOnDead() ? 'dead' : 'title';
+  if (lb.forG !== G) {
+    lb.forG = G; lb.submitted = false; lb.busy = false; lb.mine = null; lb.status = '';
+    if (mode === 'dead') lbLoad(true); else lbLoad();
+  } else if (lb.mode !== mode) {
+    lb.status = lb.offline ? 'offline' : lb.status;
+    if (mode === 'dead' && !lb.board) lbLoad(true); else lbRender();
+  } else if (!lb.els.list.firstChild && !lb.status) lbRender();
+  lb.mode = mode;
+  const P = lbPlace(), key = [Math.round(P.x), Math.round(P.y), Math.round(P.w), Math.round(P.h), mode].join(',');
+  if (key !== lb.place) {
+    lb.place = key; const s = lb.card.style;
+    s.left = Math.round(P.x) + 'px'; s.top = Math.round(P.y) + 'px'; s.width = Math.round(P.w) + 'px'; s.maxHeight = Math.round(P.h) + 'px';
+    lbRender();
+  }
 }
+function lbToggleTitle() {
+  if (!lbOnline()) { shareToast('Leaderboard offline'); return; }
+  if (lb.offline && lb.fetched) { shareToast('Leaderboard offline'); return; }
+  lb.titleOpen = !lb.titleOpen;
+  if (lb.titleOpen) lbLoad();
+}
+// Title-screen High Scores button (canvas), drawn near the bottom above the version label.
+let lbBtn = null;
+function drawLbBtn() {
+  if (!lbOnline() || G.phase !== 'ready' || clog.open) { lbBtn = null; return; }
+  const k = Math.max(1, 0.9 / viewScale), h = Math.max(30, 44 / viewScale);
+  const label = lb.offline ? 'Scores offline' : 'High Scores';
+  ctx.font = 'bold ' + (14 * k) + 'px system-ui,sans-serif'; ctx.textAlign = 'left';
+  const tw = ((ctx.measureText(label) || {}).width) || 90, w = tw + 28 * k;
+  // Sit above the version label, left side.
+  const x = VX0 + 10 + safe.l / viewScale;
+  const y = VY0 + VH - Math.max(4, 8 / viewScale) - safe.b / viewScale - h - Math.max(28, 36 / viewScale);
+  lbBtn = { x, y, w, h };
+  rrPath(x, y, w, h, h / 2);
+  ctx.fillStyle = lb.titleOpen ? 'rgba(110,170,255,0.45)' : 'rgba(90,150,255,0.20)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(150,190,255,0.85)'; ctx.lineWidth = 1.5 * k; ctx.stroke();
+  ctx.fillStyle = '#e6ecff'; ctx.textAlign = 'center';
+  ctx.fillText(label, x + w / 2, y + h / 2 + 5 * k); ctx.textAlign = 'left';
+}
+
 function drawChangelog(t) {
   clogLayout(); clogWrap();
   ctx.fillStyle = 'rgba(3,4,8,0.88)'; ctx.fillRect(VX0 - 2, VY0 - 2, VW + 4, VH + 4);
@@ -1812,7 +1919,7 @@ function drawChangelog(t) {
 
 // ---------- input & loop ----------
 let paused = false;
-function startRun() { newGame('play'); }
+function startRun() { lb.titleOpen = false; newGame('play'); }
 // Keyboard: robust against focus problems. Keys are read by e.code with an e.key fallback (case-insensitive), listeners are
 // on window AND document in the capture phase, and the canvas/body are focusable and re-focused on load / click / pointerdown.
 const KEYNAMES = ['KeyC', 'PageUp', 'PageDown', 'Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyR', 'KeyP', 'Escape'];
@@ -1843,6 +1950,13 @@ function onKeyDown(e) {
     else if (code === 'PageUp') clogScrollBy(-240); else if (code === 'PageDown' || code === 'Space') clogScrollBy(240);
     return;
   }
+  if (lb.titleOpen && G.phase === 'ready') {
+    if (code === 'Escape') { e.preventDefault(); lb.titleOpen = false; return; }
+    // don't start the run from under the scores panel with movement keys; Space/WASD close it first
+    if (['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(code)) {
+      e.preventDefault(); lb.titleOpen = false; return;
+    }
+  }
   if (e.isTrusted !== false && touchMode) touchMode = false; // a real keydown means a keyboard is in use (hybrid laptops): show keyboard text
   if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(code)) e.preventDefault();
   if (code === 'KeyC' && (G.phase === 'ready' || (G.phase === 'dead' && G.deathT > 0.5))) { openClog(); return; }
@@ -1850,7 +1964,7 @@ function onKeyDown(e) {
   if (code === 'KeyP' || code === 'Escape') { if (G.phase === 'play') { if (paused) resumeGame(); else paused = true; } return; }
   if (paused) resumeGame();                                  // ANY other key resumes (and still registers below)
   keys[code] = true;
-  if (G.phase === 'ready' && ['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(code)) { G.phase = 'play'; }
+  if (G.phase === 'ready' && ['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(code)) { lb.titleOpen = false; G.phase = 'play'; }
   if (!actx) beep(1, 0.01, 'sine', 0.0001);
 }
 function onKeyUp(e) { const code = keyCode(e); keys[code] = false; if (e.key && e.key.length === 1) { const c2 = KEYFALLBACK[e.key.toLowerCase()]; if (c2) keys[c2] = false; } }
@@ -1882,8 +1996,9 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // test hook (used by headless checks)
-window.__vac = { VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, lb, lbPlace, lbSubmit, setLeaderboardURL(u) { lb.url = String(u || '').replace(/\/+$/, ''); }, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb, pullEnv, pullVec, bugSuck, avoidVec, startEmpty, doEmpty, pickSafeSpot, updateEmpty, startPulse, planRefill, makeBug, killBug };
+window.__vac = { VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, lb, lbPlace, lbSubmit, lbToggleTitle, inSafe, setLeaderboardURL(u) { lb.url = String(u || '').replace(/\/+$/, ''); }, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb, pullEnv, pullVec, bugSuck, avoidVec, startEmpty, doEmpty, pickSafeSpot, updateEmpty, startPulse, planRefill, makeBug, killBug };
 })();
+
 </script>
 </body>
 </html>

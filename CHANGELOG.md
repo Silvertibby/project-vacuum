@@ -10,6 +10,13 @@ This history was reconstructed after the fact. All dates are 2026-10-01 and the 
 **Play it:** published to GitHub Pages at https://silvertibby.github.io/project-vacuum/ (repo: https://github.com/Silvertibby/project-vacuum).
 Note: the Pages build tracks `index.html` on `main`. See the repo for whether the latest version has been pushed yet.
 
+## [0.18.3] - 2026-10-04 (~23:45 PT)
+
+- **Title High Scores:** a clean "High Scores" button on the START screen opens Top 10 (GET `LEADERBOARD_URL/board` when the title shows / when opened). Failed fetch or offline → hide / show "offline".
+- **Game-over High Scores:** when the shared board is on, a clean modern High Scores panel **replaces** the game-over screen (run summary, Top 10, name + Submit, Play again). No CRT / arcade side card.
+- **Empty overlap-safe:** player is safe if any part of the player circle intersects the green spot (`distance < safeR + player.r`), not center-only. Bonded moths still live/die with the player.
+- **Empty telegraph:** warn time 5.2 s (was 4.2 s). Empty timing gaps unchanged (first 55–70 s, then 50–70 s, delay if pulse).
+
 ## [0.18.2] - 2026-10-04 (~23:40 PT)
 ### Changed
 - Shared leaderboard now ranks by **survival time** (longest first, best time per name); the arcade card shows times as `1ST  BEN  01:42.3` and `YOUR TIME / BEST`. Score and stats are still submitted and stored for display; score plausibility is now a soft check (implausible → stored as `null`, never rejected). Worker redeployed.
