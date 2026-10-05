@@ -35,7 +35,7 @@
 // Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
 (() => {
 'use strict';
-const VERSION = '0.20.0'; // keep in sync with CHANGELOG.md
+const VERSION = '0.21.0'; // keep in sync with CHANGELOG.md
 // Shared online leaderboard (Cloudflare Worker, see leaderboard/README.md). '' = offline: local best only, no network calls.
 // Set to the Worker URL, e.g. 'https://project-vacuum-leaderboard.<subdomain>.workers.dev' (no trailing slash), to show High Scores on title + game over.
 const LEADERBOARD_URL = 'https://project-vacuum-leaderboard.silvertibby.workers.dev';
@@ -179,19 +179,23 @@ function unlockAudio() {
 // ---------- view / touch state ----------
 // Two views share the canvas:
 //  * UI view (VX0,VY0,VW,VH,viewScale): a 700x700 logical square centred on CX,CY, used by overlays (start / game over / pause / changelog) and the touch hit-tests.
-//  * WORLD view (WX0,WY0,wScale): maps the rectangular arena onto the screen area below the HUD strip and inside the safe area; the HUD itself is drawn in CSS pixels.
+//  * WORLD view (WX0,WY0,wScale): maps the rectangular arena onto the screen area below the top HUD and (on touch) above the bottom control strip; HUD/controls are drawn in CSS pixels.
 let dpr = 1, viewScale = 1, cssW = 900, cssH = 700, VX0 = 0, VY0 = 0, VW = 900, VH = 700;
 let WX0 = 0, WY0 = 0, wScale = 1, arenaScr = { x: 0, y: 0, w: 900, h: 700 };
 let safe = { t: 0, r: 0, b: 0, l: 0 };                // safe-area insets in CSS px (iPhone notch / home bar)
 let touchMode = false;                                // true once a touch is seen (or on coarse-pointer devices)
 const touch = { ax: 0, ay: 0, joy: null, joyOn: false, dashId: null, dashHeld: false, dashBuf: 0, pauseId: null };
 const JOY_R = 58, DASH_R = 46;
+// v0.21: fixed bottom touch HUD strip (CSS px above safe.b). Arena layout reserves this so controls never cover the playfield.
+const TOUCH_HUD_H = 136;
 try { touchMode = !!((window.matchMedia && window.matchMedia('(pointer: coarse)').matches) || (navigator.maxTouchPoints > 0 && /iPhone|iPad|iPod|Android|Mobile/i.test(navigator.userAgent)) || ('ontouchstart' in window && !window.matchMedia('(pointer: fine)').matches)); } catch (e) {}
-function layoutTouch() { // button positions in CSS px
+function layoutTouch() { // locked pad positions in CSS px (strip sits below the arena)
+  const stripY = cssH - safe.b - TOUCH_HUD_H, cy = stripY + TOUCH_HUD_H / 2;
   return {
-    dash: { x: cssW - safe.r - 74, y: cssH - safe.b - 88 },
-    pause: { x: cssW - safe.r - 34, y: safe.t + 70, r: 22 },
-    hint: { x: safe.l + 96, y: cssH - safe.b - 104 },
+    strip: { x: 0, y: stripY, w: cssW, h: TOUCH_HUD_H },
+    joy: { x: safe.l + 18 + JOY_R, y: cy },
+    dash: { x: cssW - safe.r - 18 - DASH_R, y: cy },
+    pause: { x: cssW - safe.r - 34, y: safe.t + 70, r: 22 }, // top-right, clear of the top HUD strip
   };
 }
 let lastTouchMode = touchMode;
@@ -206,7 +210,7 @@ function computeLayout() {
   VX0 = CX - VW / 2;
   const above = VH > 700 ? clamp(VH * 0.44, 350, VH - 350) : VH / 2;
   VY0 = CY - above;
-  const mb = touchMode ? A.margin : 24;                       // bottom margin (room for the keyboard hint on desktop)
+  const mb = touchMode ? TOUCH_HUD_H + A.margin : 24;          // touch: reserve fixed control strip below the arena; desktop: keyboard hint
   const ax = safe.l + A.margin, ay = safe.t + A.hudH, aw = Math.max(80, cssW - safe.l - safe.r - 2 * A.margin), ah = Math.max(80, cssH - safe.t - A.hudH - safe.b - mb);
   const asp = clamp(aw / ah, A.minAsp, A.maxAsp);
   const nW = 2 * Math.round(Math.sqrt(A.area * asp) / 2), nH = 2 * Math.round(Math.sqrt(A.area / asp) / 2);
@@ -530,7 +534,7 @@ function pickSafeSpot() {
   return [c.x, c.y];
 }
 // v0.19 EMPTY PICKUP: one per run, in a corner (corner index kept so it follows arena resizes). Touch it to trigger the empty.
-function pickPos() { const m = T.empty.pickInset, c0 = G.pick ? G.pick.corner : 0, c = touchMode && c0 >= 2 ? 3 - c0 : c0; // touch: bottom corners sit under MOVE / DASH, so use the top corner on the same side
+function pickPos() { const m = T.empty.pickInset, c0 = G.pick ? G.pick.corner : 0, c = touchMode && c0 >= 2 ? 3 - c0 : c0; // touch: still avoid bottom corners (near the control strip / replay-stable with tm env ops)
   return [c === 0 || c === 3 ? AX0 + m : AX1 - m, c < 2 ? AY0 + m : AY1 - m]; } // 0 TL, 1 TR, 2 BR, 3 BL
 function emptyLocked() { return !!(G.empty || G.emptyFx || G.refill.length || G.pulseT >= 0 || G.warned); } // not during a pulse / its warning / another empty or its refill
 function emptyState() { return G.emptyCharges > 0 ? (emptyLocked() ? 'wait' : 'ready') : 'used'; }
@@ -1551,7 +1555,7 @@ function render(t) {
       drawLegend(288);
       ctx.textAlign = 'center'; ctx.fillStyle = '#ffd23c'; ctx.font = 'bold 22px system-ui,sans-serif';
       ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t * 5); ctx.fillText(touchMode ? 'TAP to start' : 'Press SPACE or a move key to start', CX, 560); ctx.globalAlpha = 1;
-      ctx.fillStyle = '#8fa0c8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText(touchMode ? 'Drag to move, tap DASH (brief invulnerability)' : 'WASD / Arrows = move     Space = dash (brief invulnerability)     R = restart', CX, 592);
+      ctx.fillStyle = '#8fa0c8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText(touchMode ? 'Stick MOVE + DASH below the arena (brief invulnerability)' : 'WASD / Arrows = move     Space = dash (brief invulnerability)     R = restart', CX, 592);
       if (best > 0) { ctx.fillStyle = '#ffd23c'; ctx.fillText('Best: ' + best.toFixed(1) + 's', CX, 620); }
       ctx.font = '12px system-ui,sans-serif'; ctx.textAlign = 'center';
       if (!keyboardSeen && !touchMode) { ctx.fillStyle = `rgba(255,210,60,${0.55 + 0.35 * Math.sin(t * 4)})`; ctx.fillText('Click the game to focus it, then use the keyboard', CX, 644); }
@@ -1591,27 +1595,34 @@ function render(t) {
 function drawTouchUI(t) {
   if (!touchMode || typeof canvas.getBoundingClientRect !== 'function') return;
   ctx.save(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const L = layoutTouch(), p = G.player, playing = G.phase === 'play';
-  // joystick (floating): faint hint ring when idle, base + knob where the thumb is
+  const L = layoutTouch(), p = G.player, playing = G.phase === 'play', S = L.strip;
+  // fixed bottom HUD strip (outside the playable canister)
+  ctx.fillStyle = 'rgba(8,10,18,0.92)'; ctx.fillRect(S.x, S.y, S.w, S.h);
+  ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(S.x, S.y, S.w, 1);
   if (playing) {
+    // locked virtual joystick (left)
+    const jx = L.joy.x, jy = L.joy.y;
+    ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(jx, jy, JOY_R, 0, TAU); ctx.fill(); ctx.stroke();
+    let knx = jx, kny = jy;
     if (touch.joy) {
-      const j = touch.joy, kx = j.x - j.ox, ky = j.y - j.oy, kd = hyp(kx, ky), kk = kd > JOY_R ? JOY_R / kd : 1;
-      ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(j.ox, j.oy, JOY_R, 0, TAU); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = 'rgba(255,244,214,0.55)'; ctx.beginPath(); ctx.arc(j.ox + kx * kk, j.oy + ky * kk, 26, 0, TAU); ctx.fill();
-    } else {
-      ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 2; ctx.setLineDash([6, 6]);
-      ctx.beginPath(); ctx.arc(L.hint.x, L.hint.y, JOY_R, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
-      ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.font = 'bold 12px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.fillText('MOVE', L.hint.x, L.hint.y + 4);
+      const kx = touch.joy.x - jx, ky = touch.joy.y - jy, kd = hyp(kx, ky), kk = kd > JOY_R ? JOY_R / kd : 1;
+      knx = jx + kx * kk; kny = jy + ky * kk;
     }
-    // DASH button (bottom-right) with cooldown sweep
+    ctx.fillStyle = touch.joyOn ? 'rgba(255,244,214,0.55)' : 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.arc(knx, kny, 26, 0, TAU); ctx.fill();
+    if (!touch.joyOn) {
+      ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.font = 'bold 12px system-ui,sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('MOVE', jx, jy + 4);
+    }
+    // DASH button (right) with cooldown sweep
     const f = 1 - clamp(p.dashCd / T.dashCd, 0, 1), ready = f >= 1, held = touch.dashHeld;
     ctx.fillStyle = held ? 'rgba(120,255,160,0.45)' : ready ? 'rgba(120,255,160,0.18)' : 'rgba(255,255,255,0.08)';
     ctx.beginPath(); ctx.arc(L.dash.x, L.dash.y, DASH_R, 0, TAU); ctx.fill();
     ctx.strokeStyle = ready ? 'rgba(120,255,160,0.85)' : 'rgba(255,255,255,0.35)'; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.arc(L.dash.x, L.dash.y, DASH_R, -Math.PI / 2, -Math.PI / 2 + TAU * f); ctx.stroke();
     ctx.fillStyle = ready ? '#d8ffe4' : 'rgba(255,255,255,0.55)'; ctx.font = 'bold 15px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.fillText('DASH', L.dash.x, L.dash.y + 5);
-    // pause button
+    // pause button (top-right, always reachable)
     ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(L.pause.x, L.pause.y, L.pause.r, 0, TAU); ctx.fill(); ctx.stroke();
     ctx.fillStyle = 'rgba(255,255,255,0.8)';
@@ -1648,17 +1659,23 @@ function setupTouch() {
     if (!isTouch) return;
     if (hyp(x - L.pause.x, y - L.pause.y) < L.pause.r + 12) { paused = true; touch.pauseId = e.pointerId; return; }
     if (hyp(x - L.dash.x, y - L.dash.y) < DASH_R * 1.4 && touch.dashId === null) { touch.dashId = e.pointerId; touch.dashHeld = true; touch.dashBuf = 0.18; return; }
-    if (x < cssW * 0.5 && touch.joy === null) { touch.joy = { id: e.pointerId, ox: x, oy: y, x, y }; touch.joyOn = true; touch.ax = touch.ay = 0; }
+    // locked stick: only from the left half of the bottom strip (origin stays at L.joy)
+    if (y >= L.strip.y && x < cssW * 0.5 && touch.joy === null) {
+      touch.joy = { id: e.pointerId, ox: L.joy.x, oy: L.joy.y, x, y }; touch.joyOn = true;
+      let dx = x - L.joy.x, dy = y - L.joy.y, d = hyp(dx, dy);
+      const m = Math.min(1, d / JOY_R), dz = 0.14;
+      if (m < dz || d < 1e-6) { touch.ax = touch.ay = 0; } else { const mag = (m - dz) / (1 - dz); touch.ax = dx / d * mag; touch.ay = dy / d * mag; }
+    }
   }, { passive: false });
   canvas.addEventListener('pointermove', e => {
     stop(e);
     if (clog.open) { if (clog.drag && clog.drag.id === e.pointerId) { const [, y] = localXY(e); clog.scroll = clamp(clog.drag.s0 - (y - clog.drag.y) / viewScale, 0, clog.max); } return; }
     const j = touch.joy; if (!j || j.id !== e.pointerId) return;
     const [x, y] = localXY(e); j.x = x; j.y = y;
+    // locked pad: origin stays at layoutTouch().joy; clamp magnitude for display, same deadzone -> ax/ay as before (replay quantize unchanged)
     let dx = x - j.ox, dy = y - j.oy, d = hyp(dx, dy);
-    if (d > JOY_R) { j.ox += dx / d * (d - JOY_R); j.oy += dy / d * (d - JOY_R); dx = x - j.ox; dy = y - j.oy; d = hyp(dx, dy); } // floating: base follows the thumb
     const m = Math.min(1, d / JOY_R), dz = 0.14;
-    if (m < dz) { touch.ax = touch.ay = 0; } else { const k = (m - dz) / (1 - dz) / (d || 1) * (d / JOY_R > 0.0001 ? 1 : 0); const mag = (m - dz) / (1 - dz); touch.ax = dx / d * mag; touch.ay = dy / d * mag; }
+    if (m < dz || d < 1e-6) { touch.ax = touch.ay = 0; } else { const mag = (m - dz) / (1 - dz); touch.ax = dx / d * mag; touch.ay = dy / d * mag; }
   }, { passive: false });
   const up = e => {
     stop(e); unlockAudio();
@@ -1685,6 +1702,8 @@ function setupTouch() {
 
 // ---------- in-game changelog (condensed from CHANGELOG.md; newest first). '## ' = version heading, '- ' = bullet ----------
 const CHANGELOG = [
+  '## v0.21.0 - 2026-10-05',
+  '- Touch: locked MOVE stick + DASH in a bottom strip (arena sits above it).',
   '## v0.20.0 - 2026-10-05',
   '- Top runs save a replay for later.',
   '## v0.19.1 - 2026-10-05',
@@ -2173,7 +2192,7 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // test hook (used by headless checks)
-window.__vac = { replayDecode, replayCheck, decodeInput, simHash, seedRng, get rngOutside() { return rngOutside; }, SIM_DT, REPLAY_MAX, VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, lb, lbPlace, lbSubmit, lbToggleTitle, inSafe, setLeaderboardURL(u) { lb.url = String(u || '').replace(/\/+$/, ''); }, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb, pullEnv, pullVec, bugSuck, avoidVec, startEmpty, doEmpty, pickSafeSpot, updateEmpty, pickPos, emptyLocked, emptyState, tryPickup, startPulse, planRefill, makeBug, killBug };
+window.__vac = { replayDecode, replayCheck, decodeInput, simHash, seedRng, get rngOutside() { return rngOutside; }, SIM_DT, REPLAY_MAX, VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, lb, lbPlace, lbSubmit, lbToggleTitle, inSafe, setLeaderboardURL(u) { lb.url = String(u || '').replace(/\/+$/, ''); }, clogScrollBy, touch, TOUCH_HUD_H, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb, pullEnv, pullVec, bugSuck, avoidVec, startEmpty, doEmpty, pickSafeSpot, updateEmpty, pickPos, emptyLocked, emptyState, tryPickup, startPulse, planRefill, makeBug, killBug };
 })();
 
 </script>
