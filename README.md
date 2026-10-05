@@ -26,4 +26,4 @@ Single-file HTML + canvas, no dependencies. Prototype.
 
 ## Shared leaderboard (optional)
 
-`leaderboard/` is a Cloudflare Worker + KV Top 10 (free tier). Deploy it (see `leaderboard/README.md`), set `LEADERBOARD_URL` in the game source, rebuild, and republish. Until then the game stays fully offline.
+`leaderboard/` is a Cloudflare Worker + KV Top 10 (free tier), live at https://project-vacuum-leaderboard.silvertibby.workers.dev (`LEADERBOARD_URL` in the game source). See `leaderboard/README.md` to redeploy; set `LEADERBOARD_URL = ''` for a fully offline build.

@@ -34,10 +34,10 @@
 <script>// Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
 (() => {
 'use strict';
-const VERSION = '0.18.0'; // keep in sync with CHANGELOG.md
+const VERSION = '0.18.1'; // keep in sync with CHANGELOG.md
 // Shared online leaderboard (Cloudflare Worker, see leaderboard/README.md). '' = offline: local best only, no network calls.
 // Set to the Worker URL, e.g. 'https://project-vacuum-leaderboard.<subdomain>.workers.dev' (no trailing slash), to show the Top 10 on game over.
-const LEADERBOARD_URL = '';
+const LEADERBOARD_URL = 'https://project-vacuum-leaderboard.silvertibby.workers.dev';
 const W = 900, H = 700, CX = W / 2, CY = H / 2;   // CX,CY = centre of the arena AND the filter (the arena itself is a rounded RECTANGLE sized to the screen, see setArena)
 let AW = 760, AH = 540, AX0 = CX - 380, AX1 = CX + 380, AY0 = CY - 270, AY1 = CY + 270; // arena rect in world units (updated by computeLayout)
 const CORNER = 40;                                // rounded-corner radius of the canister
@@ -1502,6 +1502,8 @@ function setupTouch() {
 
 // ---------- in-game changelog (condensed from CHANGELOG.md; newest first). '## ' = version heading, '- ' = bullet ----------
 const CHANGELOG = [
+  '## v0.18.1 - 2026-10-04 (~23:20 PT)',
+  '- Shared arcade Top 10 is now ON: the game-over HIGH SCORES card talks to the live leaderboard Worker. No gameplay changes.',
   '## v0.18.0 - 2026-10-04 (~23:30 PT)',
   '- Stronger filter pulse (risk / reward): bugs are dragged ~2.3x harder toward the filter (and much harder close to the core). During a pulse EVERY bug (Roach too) flees radially away from the filter; far out they mostly escape, but if you lure one near the core the suction wins and it dies. Bonded Moths stay with you. Roach chase AI itself is unchanged.',
   '- Canister EMPTY: a rare, telegraphed all-clear wipe (first ~55-70 s, then every ~50-70 s; never during a pulse). Rumble, EMPTYING..., one flashing GREEN safe spot on the far side of the arena. Everything outside the spot is wiped; you die if you miss it. Surviving = +150. Then a HEAVY refill of high-level bugs drops in (late-game difficulty stays high, not a quiet reset).',

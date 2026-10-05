@@ -10,6 +10,10 @@ This history was reconstructed after the fact. All dates are 2026-10-01 and the 
 **Play it:** published to GitHub Pages at https://silvertibby.github.io/project-vacuum/ (repo: https://github.com/Silvertibby/project-vacuum).
 Note: the Pages build tracks `index.html` on `main`. See the repo for whether the latest version has been pushed yet.
 
+## [0.18.1] - 2026-10-04 (~23:20 PT)
+### Changed
+- Enable shared arcade leaderboard URL: `LEADERBOARD_URL` = `https://project-vacuum-leaderboard.silvertibby.workers.dev` (Worker deployed, KV namespace id set in `leaderboard/wrangler.toml`). No gameplay changes.
+
 ## [0.18.0] - 2026-10-04 (~23:30 PT)
 Strategy pass + shared arcade leaderboard. Live Pages was still on v0.17, so this ships as one clean 0.18.
 ### Added
