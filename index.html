@@ -34,7 +34,7 @@
 <script>// Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
 (() => {
 'use strict';
-const VERSION = '0.18.1'; // keep in sync with CHANGELOG.md
+const VERSION = '0.18.2'; // keep in sync with CHANGELOG.md
 // Shared online leaderboard (Cloudflare Worker, see leaderboard/README.md). '' = offline: local best only, no network calls.
 // Set to the Worker URL, e.g. 'https://project-vacuum-leaderboard.<subdomain>.workers.dev' (no trailing slash), to show the Top 10 on game over.
 const LEADERBOARD_URL = 'https://project-vacuum-leaderboard.silvertibby.workers.dev';
@@ -1502,6 +1502,8 @@ function setupTouch() {
 
 // ---------- in-game changelog (condensed from CHANGELOG.md; newest first). '## ' = version heading, '- ' = bullet ----------
 const CHANGELOG = [
+  '## v0.18.2 - 2026-10-04 (~23:40 PT)',
+  '- Shared HIGH SCORES now rank by survival time (longest first), shown arcade-style as 1ST  BEN  01:42.3. Score is still sent and kept, just not used for ranking.',
   '## v0.18.1 - 2026-10-04 (~23:20 PT)',
   '- Shared arcade Top 10 is now ON: the game-over HIGH SCORES card talks to the live leaderboard Worker. No gameplay changes.',
   '## v0.18.0 - 2026-10-04 (~23:30 PT)',
@@ -1673,8 +1675,9 @@ function drawShareBtn() {
   }
 }
 // ---------- shared leaderboard (game-over card; only when LEADERBOARD_URL is set) ----------
-// GET  {url}/board -> [{name, score, time, lured, webs, ver, at}] (top 10);  POST {url}/score {name, score, time, lured, webs, ver, pulses} -> {ok, rank, top}
-// A small DOM card beside / below the game-over text: name field (remembered), Submit score, Top 10. Network failures show a toast and never block a restart.
+// Ranked by SURVIVAL TIME (longest first); score etc. are submitted and stored for display only.
+// GET  {url}/board -> [{name, time, score, lured, webs, pulses, empties, ver, at}] (top 10);  POST {url}/score {name, time, score, lured, webs, ver, pulses, empties} -> {ok, rank, improved, top}
+// A small DOM card beside / below the game-over text: name field (remembered), Submit, Top 10 times. Network failures show a toast and never block a restart.
 const LB_NAME_RE = /^[A-Za-z0-9 _-]{1,16}$/;
 const lb = { url: String(LEADERBOARD_URL || '').replace(/\/+$/, ''), card: null, els: null, board: null, forG: null, submitted: false, busy: false, mine: null, status: '', place: '' };
 function inUiBox(t) { return !!t && ((share.box && share.box.contains(t)) || (lb.card && lb.card.contains(t))); }
@@ -1700,16 +1703,18 @@ function lbSubmit() {
   lbFetch('/score', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body) }).then(({ status, j }) => { // text/plain: no CORS preflight
     lb.busy = false; if (G !== g) return;
     if (status === 200 && j && j.ok) {
-      lb.submitted = true; lb.mine = { name, score: body.score }; if (Array.isArray(j.top)) lb.board = j.top;
-      lb.status = j.rank ? 'You are #' + j.rank + ' on the board!' : (j.improved === false && j.top && j.top.some(x => String(x.name).toLowerCase() === name.toLowerCase()) ? 'Submitted - your best under that name is still higher.' : 'Submitted - not in the Top 10 this time.');
+      lb.submitted = true; lb.mine = { name, time: body.time }; if (Array.isArray(j.top)) lb.board = j.top;
+      lb.status = j.rank ? 'You are #' + j.rank + ' on the board!' : (j.improved === false && j.top && j.top.some(x => String(x.name).toLowerCase() === name.toLowerCase()) ? 'Submitted - your best time under that name is still longer.' : 'Submitted - not in the Top 10 this time.');
     } else if (status === 429) lb.status = 'Too many submissions - try again in a minute.';
-    else if (status >= 400 && status < 500) { lb.status = 'Score rejected' + (j && j.error ? ': ' + j.error : ''); lb.submitted = true; }
+    else if (status >= 400 && status < 500) { lb.status = 'Run rejected' + (j && j.error ? ': ' + j.error : ''); lb.submitted = true; }
     else return lbFail();
     lbRender();
   }, () => { lb.busy = false; if (G === g) lbFail(); });
 }
 const lbOrd = i => (['1ST','2ND','3RD','4TH','5TH','6TH','7TH','8TH','9TH','10TH'][i] || String(i + 1));
 const lbPad = (n, w) => { const t = String(Math.max(0, Math.floor(+n || 0))); return t.length >= w ? t : ('0000000000' + t).slice(-w); };
+// survival time as an arcade clock: 102.3 -> '01:42.3' (minutes keep growing past 99)
+const lbTime = s => { const d = Math.max(0, Math.round((+s || 0) * 10)), m = Math.floor(d / 600), r = d - m * 600; return lbPad(m, 2) + ':' + lbPad(Math.floor(r / 10), 2) + '.' + (r % 10); };
 function lbBuild() {
   // Old-arcade High Scores card: monospace / CRT neon panel. Readable on phone; the layout / placement / offline behaviour are unchanged.
   const card = document.createElement('div'); card.id = 'lbcard';
@@ -1720,7 +1725,7 @@ function lbBuild() {
   const hd = document.createElement('div'); hd.textContent = 'HIGH SCORES';
   hd.style.cssText = 'font-weight:bold;font-size:18px;letter-spacing:0.18em;text-align:center;color:#ffd23c;' +
     'text-shadow:0 0 8px rgba(255,210,60,0.55);margin-bottom:4px';
-  const sub = document.createElement('div'); sub.textContent = 'TOP 10';
+  const sub = document.createElement('div'); sub.textContent = 'TOP 10 - SURVIVAL TIME';
   sub.style.cssText = 'text-align:center;font-size:11px;letter-spacing:0.35em;color:#8fa0c8;margin-bottom:8px';
   const tip = document.createElement('div'); tip.textContent = 'ENTER YOUR INITIALS';
   tip.style.cssText = 'text-align:center;font-size:12px;letter-spacing:0.12em;color:#7dff9a;margin-bottom:6px;' +
@@ -1747,7 +1752,7 @@ function lbBuild() {
 function lbRender() {
   if (!lb.els) return;
   const E = lb.els;
-  E.me.textContent = 'YOUR SCORE  ' + lbPad(G.score, 6) + '   BEST  ' + lbPad(bestScore, 6);
+  E.me.textContent = 'YOUR TIME  ' + lbTime(G.t) + '   BEST  ' + lbTime(best);
   E.st.textContent = lb.status; E.st.style.color = /^You are #/.test(lb.status) ? '#8fe3a0' : '#ffb0a0';
   E.btn.disabled = lb.submitted || lb.busy; E.btn.style.opacity = E.btn.disabled ? '0.5' : '1';
   E.btn.textContent = lb.submitted ? 'CREDITED' : lb.busy ? 'SENDING...' : 'INSERT COIN';
@@ -1755,13 +1760,13 @@ function lbRender() {
   if (E.tip) E.tip.style.display = lb.submitted ? 'none' : '';
   while (E.list.firstChild) E.list.removeChild(E.list.firstChild);
   (lb.board || []).slice(0, 10).forEach((r, i) => {
-    const li = document.createElement('li'), mine = lb.mine && r.name === lb.mine.name && r.score === lb.mine.score;
+    const li = document.createElement('li'), mine = lb.mine && r.name === lb.mine.name && r.time === lb.mine.time;
     li.style.cssText = 'display:flex;gap:8px;align-items:baseline;padding:3px 0;border-top:1px solid rgba(47,243,255,0.12);' +
       'font-size:13px;letter-spacing:0.04em' + (mine ? ';color:#2ff3ff;font-weight:bold;text-shadow:0 0 6px rgba(47,243,255,0.55)' : ';color:#e6ecff');
     const a = document.createElement('span'); a.textContent = lbOrd(i); a.style.cssText = 'width:36px;color:' + (i < 3 ? '#ffd23c' : '#8fa0c8');
     const n = document.createElement('span'); n.textContent = String(r.name).toUpperCase(); // textContent: names are never parsed as HTML
     n.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-    const sc = document.createElement('span'); sc.textContent = lbPad(r.score, 6); sc.style.cssText = 'font-weight:bold;color:#7dff9a';
+    const sc = document.createElement('span'); sc.textContent = lbTime(r.time); sc.style.cssText = 'font-weight:bold;color:#7dff9a';
     li.appendChild(a); li.appendChild(n); li.appendChild(sc); E.list.appendChild(li);
   });
 }

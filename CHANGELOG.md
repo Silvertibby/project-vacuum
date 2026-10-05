@@ -10,6 +10,10 @@ This history was reconstructed after the fact. All dates are 2026-10-01 and the 
 **Play it:** published to GitHub Pages at https://silvertibby.github.io/project-vacuum/ (repo: https://github.com/Silvertibby/project-vacuum).
 Note: the Pages build tracks `index.html` on `main`. See the repo for whether the latest version has been pushed yet.
 
+## [0.18.2] - 2026-10-04 (~23:40 PT)
+### Changed
+- Shared leaderboard now ranks by **survival time** (longest first, best time per name); the arcade card shows times as `1ST  BEN  01:42.3` and `YOUR TIME / BEST`. Score and stats are still submitted and stored for display; score plausibility is now a soft check (implausible → stored as `null`, never rejected). Worker redeployed.
+
 ## [0.18.1] - 2026-10-04 (~23:20 PT)
 ### Changed
 - Enable shared arcade leaderboard URL: `LEADERBOARD_URL` = `https://project-vacuum-leaderboard.silvertibby.workers.dev` (Worker deployed, KV namespace id set in `leaderboard/wrangler.toml`). No gameplay changes.

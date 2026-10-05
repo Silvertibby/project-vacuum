@@ -26,4 +26,4 @@ Single-file HTML + canvas, no dependencies. Prototype.
 
 ## Shared leaderboard (optional)
 
-`leaderboard/` is a Cloudflare Worker + KV Top 10 (free tier), live at https://project-vacuum-leaderboard.silvertibby.workers.dev (`LEADERBOARD_URL` in the game source). See `leaderboard/README.md` to redeploy; set `LEADERBOARD_URL = ''` for a fully offline build.
+`leaderboard/` is a Cloudflare Worker + KV Top 10 ranked by survival time (longest first; free tier), live at https://project-vacuum-leaderboard.silvertibby.workers.dev (`LEADERBOARD_URL` in the game source). See `leaderboard/README.md` to redeploy; set `LEADERBOARD_URL = ''` for a fully offline build.

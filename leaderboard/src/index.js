@@ -1,8 +1,9 @@
 // Project Vacuum leaderboard Worker.
-//   GET  /board  -> top 10 [{name, score, time, lured, webs, ver, at}] sorted by score desc
-//   POST /score  -> body JSON {name, score, time, lured, webs, ver[, pulses]} -> {ok, rank, top}
-// Storage: ONE KV key "board" holding up to 50 entries (best score per name), plus short-lived "rl:<ip>" rate-limit keys.
-// Free-tier friendly: GET = 1 KV read; POST = 1-2 reads + 1 write (+1 write only if the score makes the stored 50).
+// Ranking = SURVIVAL TIME (longest first). Score and the other stats are stored for display only.
+//   GET  /board  -> top 10 [{name, time, score, lured, webs, pulses, empties, ver, at}] sorted by time desc
+//   POST /score  -> body JSON {name, time, score, lured, webs, ver[, pulses, empties]} -> {ok, rank, improved, top}
+// Storage: ONE KV key "board" holding up to 50 entries (longest time per name), plus short-lived "rl:<ip>" rate-limit keys.
+// Free-tier friendly: GET = 1 KV read; POST = 1-2 reads + 1 write (+1 write only if the time makes the stored 50).
 
 const KEEP = 50, TOP = 10;
 const RL_WINDOW = 60, RL_MAX = 6;           // loose: at most 6 submissions per IP per ~minute (KV TTL minimum is 60 s)
@@ -26,12 +27,12 @@ function json(data, status, origin, extra) {
 }
 const num = (v, lo, hi) => typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi;
 
-// Returns a clean entry or an error string.
+// Returns a clean entry or an error string. `time` (seconds survived) is the ranking key and is the only required stat.
+// `score` is optional display data: a malformed or implausible score is a SOFT failure (stored as null), never a rejection.
 export function validate(b) {
   if (!b || typeof b !== 'object' || Array.isArray(b)) return 'bad body';
   const name = typeof b.name === 'string' ? b.name.trim().replace(/\s+/g, ' ') : '';
   if (!NAME_RE.test(name)) return 'name must be 1-16 letters, digits, space, _ or -';
-  if (!num(b.score, 1, 1e7) || !Number.isInteger(b.score)) return 'bad score';
   if (!num(b.time, 0.1, 36000)) return 'bad time';
   const lured = b.lured === undefined ? 0 : b.lured, webs = b.webs === undefined ? 0 : b.webs, pulses = b.pulses === undefined ? null : b.pulses;
   const empties = b.empties === undefined ? 0 : b.empties;
@@ -40,19 +41,23 @@ export function validate(b) {
   if (pulses !== null && (!num(pulses, 0, 1e4) || !Number.isInteger(pulses))) return 'bad pulses';
   if (!num(empties, 0, 1e3) || !Number.isInteger(empties)) return 'bad empties';
   const ver = typeof b.ver === 'string' && VER_RE.test(b.ver) ? b.ver : '?';
-  // plausibility vs the game's score formula: time*10 + lured*50 + webs(you)*5 + webs(bugs)*2 + pulses*60 + empties*150
-  const maxPulses = pulses !== null ? pulses : Math.ceil(b.time / 18) + 1;
-  const maxEmpties = empties || Math.ceil(b.time / 50) + 1;
-  const lo = Math.floor(b.time * 10) - 2, hi = Math.ceil(b.time * 10) + lured * 50 + webs * 5 + maxPulses * 60 + maxEmpties * 150 + 2;
-  if (b.score < lo || b.score > hi) return 'implausible score';
   if (lured > b.time * 5 + 10 || webs > b.time * 20 + 50 || empties > b.time / 40 + 2) return 'implausible stats';
-  return { name, score: b.score, time: Math.round(b.time * 10) / 10, lured, webs, ver, at: Date.now() };
+  // soft score check vs the game's formula: time*10 + lured*50 + webs(you)*5 + webs(bugs)*2 + pulses*60 + empties*150
+  let score = null;
+  if (num(b.score, 1, 1e7) && Number.isInteger(b.score)) {
+    const maxPulses = pulses !== null ? pulses : Math.ceil(b.time / 18) + 1;
+    const maxEmpties = empties || Math.ceil(b.time / 50) + 1;
+    const lo = Math.floor(b.time * 10) - 2, hi = Math.ceil(b.time * 10) + lured * 50 + webs * 5 + maxPulses * 60 + maxEmpties * 150 + 2;
+    if (b.score >= lo && b.score <= hi) score = b.score;
+  }
+  return { name, time: Math.round(b.time * 10) / 10, score, lured, webs, pulses, empties, ver, at: Date.now() };
 }
 
 async function readBoard(env) {
   try { const v = await env.LEADERBOARD.get('board', 'json'); return Array.isArray(v) ? v : []; } catch (e) { return []; }
 }
-const sortBoard = list => list.sort((a, b) => b.score - a.score || a.at - b.at);
+const tOf = x => (x && typeof x.time === 'number' && Number.isFinite(x.time) ? x.time : 0);
+const sortBoard = list => list.sort((a, b) => tOf(b) - tOf(a) || (a.at || 0) - (b.at || 0)); // longest survival first; ties: earliest run
 
 export default {
   async fetch(request, env) {
@@ -74,12 +79,12 @@ export default {
       const n = parseInt((await env.LEADERBOARD.get(rk)) || '0', 10) || 0;
       if (n >= RL_MAX) return json({ ok: false, error: 'slow down' }, 429, origin, { 'Retry-After': String(RL_WINDOW) });
       await env.LEADERBOARD.put(rk, String(n + 1), { expirationTtl: RL_WINDOW });
-      // best score per name (case-insensitive); keep the top 50
+      // longest time per name (case-insensitive); keep the top 50
       let board = await readBoard(env);
       const key = e.name.toLowerCase(), prev = board.find(x => String(x.name).toLowerCase() === key);
       let changed = false;
       if (!prev) { board.push(e); changed = true; }
-      else if (e.score > prev.score) { board = board.filter(x => x !== prev); board.push(e); changed = true; }
+      else if (e.time > tOf(prev)) { board = board.filter(x => x !== prev); board.push(e); changed = true; }
       sortBoard(board);
       if (board.length > KEEP) board = board.slice(0, KEEP);
       const stored = board.includes(e);
