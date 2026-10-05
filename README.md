@@ -23,3 +23,7 @@ Other keys: R restart, P pause. On a phone, tap to start and restart, and use th
 - The filter in the middle is a danger zone. It swells on a rare vacuum pulse and drags you in.
 
 Single-file HTML + canvas, no dependencies. Prototype.
+
+## Shared leaderboard (optional)
+
+`leaderboard/` is a Cloudflare Worker + KV Top 10 (free tier). Deploy it (see `leaderboard/README.md`), set `LEADERBOARD_URL` in the game source, rebuild, and republish. Until then the game stays fully offline.

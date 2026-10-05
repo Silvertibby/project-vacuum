@@ -1,0 +1,14 @@
+# Project Vacuum shared leaderboard: a tiny Cloudflare Worker + one KV namespace (free tier is plenty).
+name = "project-vacuum-leaderboard"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Create the namespace with:   npx wrangler kv namespace create LEADERBOARD
+# then paste the printed id below (replace REPLACE_WITH_KV_NAMESPACE_ID).
+kv_namespaces = [
+  { binding = "LEADERBOARD", id = "REPLACE_WITH_KV_NAMESPACE_ID" }
+]
+
+[vars]
+# Comma-separated extra allowed origins (optional). https://silvertibby.github.io, localhost / 127.0.0.1 (any port) and file:// pages ("null") are always allowed.
+EXTRA_ORIGINS = ""

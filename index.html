@@ -34,7 +34,10 @@
 <script>// Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
 (() => {
 'use strict';
-const VERSION = '0.17.0'; // keep in sync with CHANGELOG.md
+const VERSION = '0.18.0'; // keep in sync with CHANGELOG.md
+// Shared online leaderboard (Cloudflare Worker, see leaderboard/README.md). '' = offline: local best only, no network calls.
+// Set to the Worker URL, e.g. 'https://project-vacuum-leaderboard.<subdomain>.workers.dev' (no trailing slash), to show the Top 10 on game over.
+const LEADERBOARD_URL = '';
 const W = 900, H = 700, CX = W / 2, CY = H / 2;   // CX,CY = centre of the arena AND the filter (the arena itself is a rounded RECTANGLE sized to the screen, see setArena)
 let AW = 760, AH = 540, AX0 = CX - 380, AX1 = CX + 380, AY0 = CY - 270, AY1 = CY + 270; // arena rect in world units (updated by computeLayout)
 const CORNER = 40;                                // rounded-corner radius of the canister
@@ -57,8 +60,21 @@ const T = {
   coreSwell: 12,                                      // extra core radius at peak of a pulse
   zoneBase: 34, zoneSwell: 28,                        // zone radius = core + zoneBase (+ zoneSwell at peak of a pulse)
   // Pulls (px/s toward filter, scaled by pulse envelope):
-  playerPull: n => Math.min(170, 100 + 10 * T.lvl(n)),       // < player speed 215, but x1.5 near the core => dash out
-  bugPull: n => Math.min(45, 18 + 3 * T.lvl(n)),             // gentle nudge, ~15% of the old pull on bugs
+  playerPull: n => Math.min(170, 100 + 10 * T.lvl(n)),       // < player speed 215, but up to +65% near the core (v0.18: was +50%) => dash out
+  playerNear: 0.65, playerNearR: 160,                         // player pull x(1 + 0.65 * (160 - d) / 160) within 160 px of the filter centre
+  // v0.18 STRONGER PULSE (risk / reward): bugs are clearly dragged (~2.3x the old 18 -> 45 px/s nudge), and much harder close to the core.
+  // During a pulse EVERY bug (Roach included; bonded Moths and spawn-protected bugs excepted) also FLEES radially away from the filter at bugFleeK x its base pull.
+  // Far out, flee (1.3x) beats pull (1.0x): bugs escape. Inside ~127 px of the filter centre the near-core pull (up to 1.9x) wins, so a bug you lure
+  // close to the filter during a pulse slowly loses and dies on the core. Both scale with the pulse envelope and the bug's mass (crossover radius is the same for every type).
+  bugPull: n => Math.min(105, 42 + 7 * T.lvl(n)),            // 45.5 px/s at pulse 1 -> 105 cap (was 19.5 -> 45)
+  bugNear: 0.9, bugNearR: 190,                                // bug pull x(1 + 0.9 * (190 - d) / 190) near the core
+  bugFleeK: 1.3,                                              // flee speed = 1.3 x base pull (x mass, x envelope)
+  // v0.18 CANISTER EMPTY: a rare, telegraphed all-clear wipe. First at 55-70 s, then every 50-70 s (never during / right before a pulse:
+  // it waits for the pulse to end + pulseGap). 4.2 s telegraph (rumble, EMPTYING..., one flashing GREEN safe spot on the far side from the player,
+  // within `reach` px so it can be reached). Then everything outside the spot is wiped (bugs, dust, webs, stingers); the player dies outside it.
+  // Surviving = +150 score. Then a HEAVY refill: min(40, 10 + t/8) bugs spawned as if 60 s later in the run (tougher), plus dust, over 2.5 s.
+  empty: { first0: 55, first1: 70, gap0: 50, gap1: 70, warn: 4.2, safeR: 64, inset: 48, reach: 720, pulseGap: 2.5, after: 1.2,
+    refillBase: 10, refillPerS: 1 / 8, refillMax: 40, refillLvl: 60, refillDur: 2.5, refillClumps: 5, refillKeep: 220 },
   // SCATTER (gentle): a pulse slides every dust clump and every web CLUSTER 60-150 px to a new spot over ~1.5-2 s (eased, no bouncing). Webs within
   // webLinkR of each other move together as one rigid unit. Targets are validated up front (arena, outside the max danger zone, off the player spawn).
   scatter: { dMin: 60, dMax: 150, dur0: 1.5, dur1: 2.0, spread: 1.3, tries: 12, spawnKeep: 48 },
@@ -86,8 +102,8 @@ const T = {
   // Stacking: a Spider laying a web within webStackR of an existing web adds a LAYER (strength, cap webMaxStr). Each pass by the player or a bug
   // (leaving / webPlayerMax s standing / bug freed) removes the WHOLE web (v0.17; layers no longer peel one by one). Bugs stay stuck webStuckPerLayer longer per extra layer.
   webStackR: 11, webMaxStr: 4, webStuckPerLayer: 0.3,
-  // Score (provisional): time*10 + lured kills*50 + webs broken by you*5 + webs broken by bugs*2 + pulses*60 (was 100; pulses now come ~2x as often)
-  score: { time: 10, lure: 50, webPlayer: 5, webBug: 2, pulse: 60 },
+  // Score (provisional): time*10 + lured kills*50 + webs broken by you*5 + webs broken by bugs*2 + pulses*60 + canister empties survived*150 (v0.18)
+  score: { time: 10, lure: 50, webPlayer: 5, webBug: 2, pulse: 60, empty: 150 },
   stingerLife: 2.6,
   fightDmg: { sting: 1, charge: 2, lunge: 2 },        // friendly-fire damage to other bugs
 };
@@ -227,6 +243,7 @@ function refitArena() { // the arena changed size (rotation / resize): pull ever
   G.slides = [];
   for (const o of G.clumps.concat(G.webs)) o.mv = false;
   G.streaks.forEach(s => { s.r = Math.min(s.r, edgeR(s.a)); });
+  if (G.empty) { const m = T.empty.inset; G.empty.x = clamp(G.empty.x, AX0 + m, AX1 - m); G.empty.y = clamp(G.empty.y, AY0 + m, AY1 - m); }
 }
 
 // ---------- state ----------
@@ -244,6 +261,7 @@ function newGame(phase) {
     player: { x: CX, y: spawnY(), vx: 0, vy: 0, r: T.playerR, dashT: 0, dashCd: 0, dx: 0, dy: -1, ifr: 0, trail: [] },
     bugs: [], clumps: [], parts: [], texts: [], streaks: [], webs: [], slides: [], rings: [], stingers: [], tally: {},
     lureKills: 0, sucked: 0, bugsKilled: 0, websPlayer: 0, websBugs: 0, score: 0, newBestScore: false, shake: 0, cause: '', newBest: false, deathT: 0, lastBeep: -1,
+    nextEmptyAt: rnd(T.empty.first0, T.empty.first1), empty: null, emptyFx: null, empties: 0, emptiedBugs: 0, refill: [], rumbleT: 0,
   };
   for (let i = 0; i < 44; i++) { const a = rnd(TAU); G.streaks.push({ a, r: rnd(G.filterR, edgeR(a)), l: rnd(10, 30) }); }
   // opening population
@@ -263,8 +281,8 @@ function newGame(phase) {
 
 // hp ramp by SPAWN time: early bugs are fragile (friendly fire kills them), late bugs are tougher AND hit harder (dmgMult)
 function hpMult(t) { const H = T.hp; return t < H.full ? H.start + (1 - H.start) * t / H.full : Math.min(H.max, 1 + (t - H.full) / H.slope); }
-function makeBug(type, x, y) {
-  const d = TYPES[type], m = hpMult(G.t || 0), hp0 = type === 'moth' ? d.hp : Math.max(1, d.hp * m);
+function makeBug(type, x, y, lvlT) { // lvlT: spawn 'as if' at this run time (refill bugs after a canister empty are tougher)
+  const d = TYPES[type], m = hpMult(lvlT !== undefined ? lvlT : (G.t || 0)), hp0 = type === 'moth' ? d.hp : Math.max(1, d.hp * m);
   const ty = G.tally[type] || (G.tally[type] = { n: 0, fight: 0, sucked: 0, shield: 0, by: {} }); ty.n++;
   return { id: nextId++, type, x, y, vx: 0, vy: 0, ang: rnd(TAU), r: d.r, hp: hp0, maxHp: hp0, dmgMult: Math.pow(Math.max(1, m), T.hp.dmgPow), spawn: 0.9, stun: 0, iCd: 0, flash: 0,
     bonded: false, state: 'idle', st: 0, cd: type === 'wasp' ? rnd(2.5, 4) : rnd(0.5, 2), wt: 0, wa: rnd(TAU), dx: 0, dy: 0, lastHitBy: null,
@@ -286,12 +304,21 @@ function pullEnv() {
   return Math.min(sstep(G.pulseT / 0.5), sstep((G.pulseDur - G.pulseT) / 0.6));
 }
 function zoneR() { return G.filterR + T.zoneBase + T.zoneSwell * pullEnv(); }
-// pull toward the filter: strength = base px/s * pulse envelope * mass; `near` adds up to +50% close to the core (player only)
-function pullVec(x, y, base, near) {
+// player pull toward the filter: base px/s * pulse envelope, up to +65% close to the core
+function pullVec(x, y, base) {
   const env = pullEnv(); if (env <= 0) return [0, 0];
   const dx = CX - x, dy = CY - y, d = hyp(dx, dy) || 1;
-  const s = base * env * (near ? 1 + Math.max(0, (150 - d) / 150) * 0.5 : 1);
+  const s = base * env * (1 + Math.max(0, (T.playerNearR - d) / T.playerNearR) * T.playerNear);
   return [dx / d * s, dy / d * s];
+}
+// v0.18 bug suction during a pulse: pull (stronger near the core) minus a radial FLEE away from the filter (every bug tries to escape, Roach too).
+// Returns { pull, flee, net } in px/s (net > 0 = dragged inward) plus the unit vector toward the filter. Bonded Moths and spawn-protected bugs: none.
+function bugSuck(b) {
+  const env = pullEnv(), dx = CX - b.x, dy = CY - b.y, d = hyp(dx, dy) || 1;
+  if (env <= 0 || b.protect > 0 || (b.type === 'moth' && b.bonded)) return { pull: 0, flee: 0, net: 0, ux: dx / d, uy: dy / d, d };
+  const base = T.bugPull(G.pulseN) * TYPES[b.type].mass * (b.state === 'charge' ? 0.5 : 1) * env;
+  const pull = base * (1 + T.bugNear * Math.max(0, (T.bugNearR - d) / T.bugNearR)), flee = base * T.bugFleeK;
+  return { pull, flee, net: pull - flee, ux: dx / d, uy: dy / d, d };
 }
 // non-Roach bugs steer away from the danger zone (added on top of AI velocity, so Roach AI stays exactly as before)
 function avoidVec(b) {
@@ -322,7 +349,7 @@ function rimSpot() {
   return null;
 }
 function trickleSpawn(dt) {
-  if (G.pulseT >= 0 || G.nextPulseAt - G.t < T.warn + 0.5) return; // not during suction or the telegraph window
+  if (G.pulseT >= 0 || G.nextPulseAt - G.t < T.warn + 0.5 || G.empty || G.refill.length) return; // not during suction, a telegraph, a canister empty or its refill
   G.trickleT -= dt;
   if (G.trickleT <= 0) {
     G.trickleT = T.trickle(G.t) * rnd(0.8, 1.2);
@@ -377,6 +404,100 @@ function startPulse() {
   }
   G.spawnPlan = [];
   G.shake = 2; beep(80, 0.5, 'sawtooth', 0.08);
+}
+
+// ---------- canister EMPTY (v0.18): rare, telegraphed all-clear wipe + heavy refill ----------
+// The safe spot: one point on the far side of the arena from the player (a pocket / corner near the opposite wall), out of the filter's danger zone,
+// and at most T.empty.reach px away so it can always be reached in the telegraph.
+function pickSafeSpot() {
+  const E = T.empty, p = G.player, m = E.inset, rz = maxZone() + E.safeR + 10;
+  const ox = CX - p.x, oy = CY - p.y, od = hyp(ox, oy), x0 = AX0 + m, x1 = AX1 - m, y0 = AY0 + m, y1 = AY1 - m, w = x1 - x0, h = y1 - y0, per = 2 * (w + h);
+  const cands = [];
+  for (let i = 0; i < 96; i++) { // evenly along the inset perimeter (so the corners / pockets are included)
+    let u = per * i / 96, x, y;
+    if (u < w) { x = x0 + u; y = y0; } else if ((u -= w) < h) { x = x1; y = y0 + u; } else if ((u -= h) < w) { x = x1 - u; y = y1; } else { u -= w; x = x0; y = y1 - u; }
+    const dc = hyp(x - CX, y - CY); if (dc < rz) continue;
+    cands.push({ x, y, dp: hyp(x - p.x, y - p.y), opp: od < 40 ? 1 : ((x - CX) * ox + (y - CY) * oy) / (dc * od) });
+  }
+  let pool = cands.filter(c => c.opp > 0.2 && c.dp <= E.reach);
+  if (!pool.length) pool = cands.filter(c => c.opp > 0).sort((a, b) => a.dp - b.dp).slice(0, 1);
+  if (!pool.length) pool = cands.length ? cands : [{ x: x0, y: y0, dp: 0 }];
+  const far = Math.max(...pool.map(c => c.dp)), top = pool.filter(c => c.dp >= far - 40), c = top[Math.floor(rnd(top.length))] || pool[0];
+  return [c.x, c.y];
+}
+function startEmpty() {
+  const E = T.empty, [x, y] = pickSafeSpot();
+  G.empty = { t: 0, x, y, r: E.safeR, px: G.player.x, py: G.player.y };
+  // no pulse warning until the wipe, the aftershock and the refill are over
+  const minPulse = G.t + E.warn + E.after + E.refillDur + 1 + T.warn; if (G.nextPulseAt < minPulse) G.nextPulseAt = minPulse;
+  G.shake = Math.max(G.shake, 3); G.rumbleT = 0; beep(55, 0.9, 'sawtooth', 0.09); beep(82, 0.6, 'square', 0.04);
+}
+function inSafe(x, y) { const S = G.empty || G.emptyFx; return !!S && hyp(x - S.x, y - S.y) <= S.r; }
+function doEmpty() {
+  const E = T.empty, S = G.empty, p = G.player, safeP = inSafe(p.x, p.y);
+  for (const b of G.bugs) {
+    if (b.dead) continue;
+    if (b.type === 'moth' && b.bonded) { if (safeP) continue; }        // your escort lives or goes with you
+    else if (inSafe(b.x, b.y)) continue;                               // bugs that made it into the green spot survive too
+    b.dead = true; b.hp = 0; G.emptiedBugs++;
+    const ty = G.tally[b.type]; if (ty) ty.emptied = (ty.emptied || 0) + 1;
+    burst(b.x, b.y, TYPES[b.type].color, 5, 150, 0.6);
+  }
+  G.bugs = G.bugs.filter(b => !b.dead);
+  for (const c of G.clumps) if (!inSafe(c.x, c.y)) { c.dead = true; burst(c.x, c.y, '#8d8678', 6, 160, 0.7); }
+  G.clumps = G.clumps.filter(c => !c.dead);
+  for (const w of G.webs) if (!inSafe(w.x, w.y)) w.dead = true;        // swept out (not counted as 'webs broken')
+  G.webs = G.webs.filter(w => !w.dead);
+  G.stingers = G.stingers.filter(s => inSafe(s.x, s.y));
+  G.slides = G.slides.filter(g => g.members.some(o => !o.dead));
+  if (p.webTouched) p.webTouched = p.webTouched.filter(w => !w.dead);
+  G.spawnPlan = [];
+  G.empty = null; G.emptyFx = { t: 0, x: S.x, y: S.y, r: S.r, survived: safeP };
+  G.nextEmptyAt = G.t + rnd(E.gap0, E.gap1);
+  G.shake = 18; beep(45, 1.0, 'sawtooth', 0.11); beep(140, 0.35, 'triangle', 0.05);
+  for (let i = 0; i < 36; i++) { const [x, y] = arenaPoint(10); burst(x, y, i % 3 ? '#8d8678' : '#cfc6b0', 3, 220, 0.9); } // aftershock: dust everywhere
+  burst(S.x, S.y, '#7dff9a', 30, 200, 0.9);
+  if (!safeP) { die('Emptied out with the canister (missed the green spot)'); return; }
+  G.empties++;
+  floatText(p.x, p.y - 26, 'SURVIVED THE EMPTY! +' + T.score.empty, '#7dff9a');
+  planRefill();
+}
+// heavy refill right after a survived empty: the run does NOT reset to easy. Bugs land at the rim away from you (telegraphed with + markers during the aftershock).
+function planRefill() {
+  const E = T.empty, p = G.player, S = G.emptyFx;
+  const n = Math.max(0, Math.min(E.refillMax, Math.round(E.refillBase + G.t * E.refillPerS), T.maxBugs - G.bugs.length));
+  let moths = G.bugs.filter(b => b.type === 'moth').length;
+  const spot = () => {
+    for (let k = 0; k < 40; k++) { const [x, y] = perimeterSpot(26); if (hyp(x - p.x, y - p.y) > E.refillKeep && hyp(x - S.x, y - S.y) > S.r + 50) return [x, y]; }
+    return perimeterSpot(26);
+  };
+  G.refill = [];
+  for (let i = 0; i < n; i++) { const type = pickType(moths); if (type === 'moth') moths++; const [x, y] = spot(); G.refill.push({ type, x, y, at: G.t + E.after + E.refillDur * i / Math.max(1, n - 1) }); }
+  for (let i = 0; i < E.refillClumps; i++) { const [x, y] = spot(); G.refill.push({ type: 'clump', x, y, at: G.t + E.after + E.refillDur * (i + 0.5) / E.refillClumps }); }
+  G.trickleT = Math.max(G.trickleT, E.after + E.refillDur + 2);
+}
+function updateEmpty(dt) {
+  const E = T.empty;
+  if (G.emptyFx) { G.emptyFx.t += dt; if (G.emptyFx.t > E.after + 0.6) G.emptyFx = null; }
+  if (G.refill.length) {
+    const due = G.refill.filter(q => q.at <= G.t); G.refill = G.refill.filter(q => q.at > G.t);
+    for (const q of due) {
+      if (q.type === 'clump') { if (G.clumps.length < T.maxClumps) G.clumps.push(newClump(q.x, q.y, rnd(13, 22))); }
+      else if (G.bugs.length < T.maxBugs) { const b = makeBug(q.type, q.x, q.y, G.t + E.refillLvl); b.refill = true; G.bugs.push(b); }
+    }
+  }
+  if (G.empty) { // telegraph: rumble + flashing green spot, then the wipe
+    G.empty.t += dt; G.shake = Math.max(G.shake, 1.5 + 3.5 * clamp(G.empty.t / E.warn, 0, 1));
+    G.rumbleT -= dt; if (G.rumbleT <= 0) { G.rumbleT = 0.45 - 0.25 * clamp(G.empty.t / E.warn, 0, 1); beep(50 + 30 * G.empty.t / E.warn, 0.25, 'sawtooth', 0.06); }
+    if (G.empty.t >= E.warn) doEmpty();
+    return;
+  }
+  if (G.t < G.nextEmptyAt) return;
+  if (G.pulseT >= 0 || G.warned) { // never during a pulse or its warning: wait for the pulse to end + a short gap
+    const end = G.pulseT >= 0 ? G.t + (G.pulseDur - G.pulseT) : G.nextPulseAt + T.pullDur(G.pulseN + 1);
+    G.nextEmptyAt = end + E.pulseGap; return;
+  }
+  startEmpty();
 }
 
 // ---------- scatter (gentle pulse slide for dust clumps + web clusters) ----------
@@ -561,8 +682,11 @@ function updateBug(b, dt) {
   }
   b.vx += (dvx - b.vx) * Math.min(1, accel * dt); b.vy += (dvy - b.vy) * Math.min(1, accel * dt);
   b.protect = Math.max(0, b.protect - dt);
-  let [px, py] = (b.protect > 0 || (b.type === 'moth' && b.bonded)) ? [0, 0] : pullVec(b.x, b.y, T.bugPull(G.pulseN) * TYPES[b.type].mass * (b.state === 'charge' ? 0.5 : 1), false);
-  if (!(b.type === 'moth' && b.bonded)) { const [ax, ay] = avoidVec(b); px += ax; py += ay; }
+  // suction (v0.18): pull minus flee is added on top of the AI velocity (the Roach chase itself is untouched). Outside a pulse non-Roach bugs keep
+  // steering away from the zone (avoidVec); during a pulse that avoidance fades out with the envelope and the flee takes over, so a lured bug can lose.
+  const su = bugSuck(b), envB = pullEnv();
+  let px = su.ux * su.net, py = su.uy * su.net;
+  if (!(b.type === 'moth' && b.bonded)) { const [ax, ay] = avoidVec(b); px += ax * (1 - envB); py += ay * (1 - envB); }
   let wf = 1; // webs: only a movement multiplier is applied (AI, incl. Roach chase, is untouched)
   if (b.type !== 'spider' && !(b.type === 'moth' && b.bonded)) {
     b.webImm = Math.max(0, b.webImm - dt);
@@ -608,7 +732,7 @@ function weakenWebs(list, who) {
   }
 }
 function websBroken() { return G.websPlayer + G.websBugs; }
-function calcScore() { const S = T.score; return Math.floor(G.t * S.time + G.lureKills * S.lure + G.websPlayer * S.webPlayer + G.websBugs * S.webBug + G.pulseN * S.pulse); }
+function calcScore() { const S = T.score; return Math.floor(G.t * S.time + G.lureKills * S.lure + G.websPlayer * S.webPlayer + G.websBugs * S.webBug + G.pulseN * S.pulse + (G.empties || 0) * S.empty); }
 function fireStingers(b) {
   const n = Math.min(3, 1 + Math.floor(G.t / 50)), spd = T.wasp.speed + Math.min(40, G.t / 4), base = Math.atan2(b.dy, b.dx);
   for (let i = 0; i < n; i++) {
@@ -746,7 +870,7 @@ function updatePlayer(dt) {
   let tvx, tvy;
   if (p.dashT > 0) { p.dashT -= dt; tvx = p.dx * T.dashSpeed; tvy = p.dy * T.dashSpeed; p.vx = tvx; p.vy = tvy; }
   else { tvx = ix * T.playerSpeed; tvy = iy * T.playerSpeed; const k = Math.min(1, 22 * dt); p.vx += (tvx - p.vx) * k; p.vy += (tvy - p.vy) * k; }
-  const [px, py] = pullVec(p.x, p.y, T.playerPull(G.pulseN), true);
+  const [px, py] = pullVec(p.x, p.y, T.playerPull(G.pulseN));
   const under = websAt(p.x, p.y);
   p.webbed = under.length > 0; p.webStr = p.webbed ? maxStr(under) : 0;
   if (p.webbed) { // stuck on the web(s): slowed while on them; each pass (leave, or webPlayerMax s standing) removes the whole web
@@ -773,7 +897,7 @@ function die(reason) {
   G.phase = 'dead'; G.cause = reason; G.deathT = 0;
   G.newBest = G.t > best; if (G.newBest) { best = G.t; saveBest(best); }
   G.score = calcScore(); G.newBestScore = G.score > bestScore; if (G.newBestScore) bestScore = G.score;
-  G.record = { version: VERSION, time: +G.t.toFixed(1), pulses: G.pulseN, luredKills: G.lureKills, websBroken: websBroken(), websByPlayer: G.websPlayer, websByBugs: G.websBugs, bugsKilled: G.bugsKilled, lostToFilter: G.sucked, score: G.score, cause: reason, ts: Date.now() };
+  G.record = { version: VERSION, time: +G.t.toFixed(1), pulses: G.pulseN, luredKills: G.lureKills, websBroken: websBroken(), websByPlayer: G.websPlayer, websByBugs: G.websBugs, bugsKilled: G.bugsKilled, lostToFilter: G.sucked, empties: G.empties, emptiedBugs: G.emptiedBugs, score: G.score, cause: reason, ts: Date.now() };
   saveRun(G.record);
   G.shake = 14; burst(G.player.x, G.player.y, '#fff4d6', 30, 220, 1);
   beep(120, 0.6, 'sawtooth', 0.1);
@@ -804,6 +928,8 @@ function step(dt) {
     if (G.warned && tl > 0) { const s = Math.ceil(tl); if (s !== G.lastBeep) { G.lastBeep = s; beep(440 + (3 - s) * 110, 0.12, 'square', 0.04); } }
     if (tl <= 0) startPulse();
   }
+  updateEmpty(dt);
+  if (G.phase !== 'play') return; // died in the wipe
   // filter grows with pulses (storm-circle feel), eased
   const fr = T.coreR(G.pulseN) + T.coreSwell * pullEnv();
   G.filterR += (fr - G.filterR) * Math.min(1, 3 * dt);
@@ -1079,6 +1205,52 @@ function drawWarning(t) {
     ctx.fillStyle = col; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('+', s.x, s.y + 3);
   }
 }
+// v0.18 canister empty visuals. Under the bugs: a red danger tint over the whole arena with a hole at the safe spot, and the pulsing GREEN spot itself.
+// Over everything but the player: a flashing ring + SAFE label and, while you are outside it, a green arrow from you to the spot. Then the wipe flash.
+function drawEmptyUnder(t) {
+  const S = G.empty, F = G.emptyFx;
+  if (S) {
+    const k = clamp(S.t / T.empty.warn, 0, 1), fl = 0.5 + 0.5 * Math.sin(t * (8 + 14 * k));
+    ctx.save(); ctx.beginPath(); ctx.rect(AX0 - 10, AY0 - 10, AW + 20, AH + 20); ctx.arc(S.x, S.y, S.r, 0, TAU, true);
+    ctx.fillStyle = `rgba(255,40,40,${0.06 + 0.16 * k + 0.06 * fl})`; ctx.fill('evenodd'); ctx.restore();
+    const g = ctx.createRadialGradient(S.x, S.y, 4, S.x, S.y, S.r * 1.35);
+    g.addColorStop(0, `rgba(125,255,154,${0.55 + 0.3 * fl})`); g.addColorStop(0.72, `rgba(60,230,110,${0.28 + 0.25 * fl})`); g.addColorStop(1, 'rgba(60,230,110,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(S.x, S.y, S.r * 1.35, 0, TAU); ctx.fill();
+  }
+  if (F) { // the wipe: a pale flash over everything outside the spot, fading, plus a green shock ring from the spot
+    const a = clamp(1 - F.t / 0.6, 0, 1);
+    if (a > 0) { ctx.save(); ctx.beginPath(); ctx.rect(AX0 - 10, AY0 - 10, AW + 20, AH + 20); ctx.arc(F.x, F.y, F.r, 0, TAU, true); ctx.fillStyle = `rgba(255,248,230,${0.75 * a})`; ctx.fill('evenodd'); ctx.restore(); }
+    const k = clamp(F.t / T.empty.after, 0, 1);
+    ctx.strokeStyle = `rgba(125,255,154,${0.9 * (1 - k)})`; ctx.lineWidth = 6 * (1 - k) + 1; ctx.beginPath(); ctx.arc(F.x, F.y, F.r + k * Math.max(AW, AH), 0, TAU); ctx.stroke();
+    if (F.t < 0.9) { ctx.fillStyle = `rgba(125,255,154,${0.35 * (1 - F.t / 0.9)})`; ctx.beginPath(); ctx.arc(F.x, F.y, F.r, 0, TAU); ctx.fill(); }
+  }
+  for (const q of G.refill) { // incoming refill markers (like the pulse wave markers)
+    const col = q.type === 'clump' ? '#a39b8a' : TYPES[q.type].color, rr = 8 + Math.sin(t * 10) * 2;
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.arc(q.x, q.y, rr, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = col; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('+', q.x, q.y + 3);
+  }
+}
+function drawEmptyOver(t) {
+  const S = G.empty; if (!S) return;
+  const k = clamp(S.t / T.empty.warn, 0, 1), on = Math.sin(t * (6 + 12 * k)) > -0.2, p = G.player;
+  ctx.strokeStyle = on ? '#7dff9a' : 'rgba(125,255,154,0.35)'; ctx.lineWidth = on ? 4 : 2; ctx.setLineDash([12, 7]); ctx.lineDashOffset = -t * 40;
+  ctx.beginPath(); ctx.arc(S.x, S.y, S.r, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+  ctx.strokeStyle = `rgba(125,255,154,${0.6 * (1 - ((t * 1.5) % 1))})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(S.x, S.y, S.r * (0.4 + 0.6 * ((t * 1.5) % 1)), 0, TAU); ctx.stroke();
+  ctx.textAlign = 'center'; ctx.font = 'bold 15px system-ui,sans-serif'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(4,20,8,0.9)'; ctx.fillStyle = on ? '#eaffef' : '#7dff9a';
+  ctx.strokeText('SAFE', S.x, S.y + 5); ctx.fillText('SAFE', S.x, S.y + 5);
+  const left = Math.max(0, T.empty.warn - S.t).toFixed(1);
+  ctx.font = 'bold 12px system-ui,sans-serif'; ctx.strokeText(left, S.x, S.y + 21); ctx.fillText(left, S.x, S.y + 21);
+  // big flashing EMPTYING... across the top of the arena
+  ctx.font = 'bold 30px system-ui,sans-serif'; ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(30,4,4,0.85)';
+  ctx.fillStyle = `rgba(255,${90 + 120 * (on ? 1 : 0)},80,${0.75 + 0.25 * k})`; const ty = S.y < CY ? AY1 - 34 : AY0 + 46;
+  ctx.strokeText('EMPTYING\u2026', CX, ty); ctx.fillText('EMPTYING\u2026', CX, ty);
+  const dx = S.x - p.x, dy = S.y - p.y, d = hyp(dx, dy);
+  if (d > S.r && G.phase === 'play') { // arrow from the player toward the spot
+    const ux = dx / d, uy = dy / d, ax = p.x + ux * 34, ay = p.y + uy * 34, L = Math.min(46, d - S.r);
+    ctx.strokeStyle = '#7dff9a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax + ux * L, ay + uy * L); ctx.stroke();
+    const hx = ax + ux * L, hy = ay + uy * L; ctx.fillStyle = '#7dff9a'; ctx.beginPath(); ctx.moveTo(hx + ux * 9, hy + uy * 9); ctx.lineTo(hx - uy * 7, hy + ux * 7); ctx.lineTo(hx + uy * 7, hy - ux * 7); ctx.closePath(); ctx.fill();
+  }
+}
 function drawStuckLabel() {
   if (G.phase === 'play' && G.player.webbed) { ctx.textAlign = 'center'; ctx.font = 'bold 12px system-ui,sans-serif'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(4,6,12,0.85)'; ctx.fillStyle = 'rgba(235,220,255,0.95)'; const sl = ('STUCK -' + Math.round((G.player.webSlowNow || 0.5) * 100) + '%' + (G.player.webStr > 1 ? '  (layer ' + G.player.webStr + ')' : '')); ctx.strokeText(sl, G.player.x, G.player.y + 38); ctx.fillText(sl, G.player.x, G.player.y + 38); } // below the player, clear of its halo and locator arrow
 }
@@ -1087,7 +1259,7 @@ function drawHUD(t) { // screen space, CSS pixels: a slim strip above the arena 
   const L = safe.l + 14, Rr = cssW - safe.r - 14, top = safe.t, mid = cssW / 2;
   ctx.textAlign = 'left'; ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 22px system-ui,sans-serif';
   ctx.fillText(G.t.toFixed(1) + 's', L, top + 25);
-  const stats = 'Pulses: ' + G.pulseN + '   Lured kills: ' + G.lureKills + '   Webs broken: ' + websBroken() + '   Bugs: ' + G.bugs.length + '   Dust: ' + G.clumps.length;
+  const stats = 'Pulses: ' + G.pulseN + (G.empties ? '   Empties: ' + G.empties : '') + '   Lured kills: ' + G.lureKills + '   Webs broken: ' + websBroken() + '   Bugs: ' + G.bugs.length + '   Dust: ' + G.clumps.length;
   let fs = 12; ctx.font = fs + 'px system-ui,sans-serif'; while (fs > 8 && tw(stats) > Rr - L) { fs--; ctx.font = fs + 'px system-ui,sans-serif'; }
   ctx.fillStyle = '#8fa0c8'; ctx.fillText(stats, L, top + 44);
   ctx.textAlign = 'right'; ctx.fillStyle = '#ffd23c'; ctx.font = 'bold 14px system-ui,sans-serif';
@@ -1095,7 +1267,16 @@ function drawHUD(t) { // screen space, CSS pixels: a slim strip above the arena 
   if (!touchMode) { ctx.fillStyle = '#8fa0c8'; ctx.font = '12px system-ui,sans-serif'; ctx.fillText('WASD/Arrows move   Space dash   R restart   P pause', Rr, cssH - safe.b - 8); }
   // pulse banner (centre of the strip)
   ctx.textAlign = 'center';
-  if (G.pulseT >= 0) {
+  if (G.empty) { // canister empty telegraph: overrides the pulse banner
+    const left = Math.max(0, T.empty.warn - G.empty.t), on = Math.sin(t * 16) > 0;
+    ctx.fillStyle = on ? '#7dff9a' : '#ffffff'; ctx.font = 'bold 18px system-ui,sans-serif';
+    ctx.fillText('CANISTER EMPTYING ' + left.toFixed(1) + ' - GET TO THE GREEN!', mid, top + 22);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(mid - 80, top + 30, 160, 5);
+    ctx.fillStyle = '#7dff9a'; ctx.fillRect(mid - 80, top + 30, 160 * clamp(left / T.empty.warn, 0, 1), 5);
+  } else if (G.emptyFx || G.refill.length) {
+    ctx.fillStyle = '#7dff9a'; ctx.font = 'bold 18px system-ui,sans-serif';
+    ctx.fillText(G.refill.length ? 'REFILL INCOMING: +' + G.refill.filter(q => q.type !== 'clump').length + ' bugs' : 'CANISTER EMPTIED!', mid, top + 22);
+  } else if (G.pulseT >= 0) {
     const left = G.pulseDur - G.pulseT;
     ctx.fillStyle = `rgba(255,90,70,${0.6 + 0.4 * Math.sin(t * 14)})`; ctx.font = 'bold 18px system-ui,sans-serif';
     ctx.fillText('FILTER SURGE! ' + left.toFixed(1), mid, top + 22);
@@ -1120,30 +1301,36 @@ function wrapLines(txt, maxW) {
 function overlay(lines, sub) {
   ctx.fillStyle = 'rgba(5,6,10,0.78)'; ctx.fillRect(VX0 - 2, VY0 - 2, VW + 4, VH + 4);
   ctx.textAlign = 'center';
-  let y = lines.y; const maxW = Math.min(W - 20, VW - 30);
+  let y = lines.y; const maxW = lines.maxW || Math.min(W - 20, VW - 30), ocx = lines.cx || CX; // cx / maxW: shifted, narrower text when the leaderboard card sits beside it
   for (const l of lines.items) {
     ctx.fillStyle = l.c || '#e6ecff'; ctx.font = l.f;
     const ls = wrapLines(l.t, maxW), lh = Math.round(parseFloat(/(\d+(?:\.\d+)?)px/.exec(l.f)[1]) * 1.3);
-    ls.forEach((ln, i) => ctx.fillText(ln, CX, y + i * lh));
+    ls.forEach((ln, i) => ctx.fillText(ln, ocx, y + i * lh));
     y += l.h + (ls.length - 1) * lh;
   }
 }
 function drawLegend(y0) {
   ctx.textAlign = 'left';
   const order = ['roach', 'wasp', 'spider', 'beetle', 'moth'];
-  order.forEach((k, i) => { const y = y0 + i * 26, d = TYPES[k];
+  order.forEach((k, i) => { const y = y0 + i * 22, d = TYPES[k];
     ctx.fillStyle = d.color; ctx.beginPath(); ctx.arc(CX - 250, y - 5, 7, 0, TAU); ctx.fill();
     ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 14px system-ui,sans-serif'; ctx.fillText(d.name, CX - 232, y);
     ctx.fillStyle = '#9fb0d8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText(d.desc, CX - 150, y); });
   // danger-zone note
-  const y = y0 + order.length * 26 + 4;
+  const y = y0 + order.length * 22 + 6;
   const zg = ctx.createRadialGradient(CX - 250, y - 5, 2, CX - 250, y - 5, 11);
   zg.addColorStop(0, '#05060a'); zg.addColorStop(0.5, '#05060a'); zg.addColorStop(0.55, 'rgba(255,110,40,0.7)'); zg.addColorStop(1, 'rgba(255,150,30,0.2)');
   ctx.fillStyle = zg; ctx.beginPath(); ctx.arc(CX - 250, y - 5, 11, 0, TAU); ctx.fill();
   ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 14px system-ui,sans-serif'; ctx.fillText('Filter', CX - 232, y);
-  ctx.fillStyle = '#9fb0d8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText('orange DANGER ZONE: the dark core kills anything; it swells on a pulse.', CX - 150, y);
-  ctx.fillText('A pulse gently slides dust and webs to new spots (webs stay linked).', CX - 150, y + 20);
-  ctx.fillText('Dust cracks and pops when hit, or when the filter core touches it.', CX - 150, y + 40);
+  ctx.fillStyle = '#9fb0d8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText('the dark core kills anything. A PULSE swells it and drags everyone in:', CX - 150, y);
+  ctx.fillText('bugs flee, but lure one close to the filter and the suction wins.', CX - 150, y + 20);
+  // canister empty note (v0.18)
+  const y2 = y + 42;
+  ctx.fillStyle = 'rgba(125,255,154,0.85)'; ctx.beginPath(); ctx.arc(CX - 250, y2 - 5, 8, 0, TAU); ctx.fill();
+  ctx.strokeStyle = '#7dff9a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(CX - 250, y2 - 5, 11, 0, TAU); ctx.stroke();
+  ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 14px system-ui,sans-serif'; ctx.fillText('Empty', CX - 232, y2);
+  ctx.fillStyle = '#9fb0d8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText('Rarely the canister is EMPTIED: reach the flashing GREEN spot or be', CX - 150, y2);
+  ctx.fillText('wiped out with everything else (+150). Then a big refill drops in.', CX - 150, y2 + 20);
 }
 
 function render(t) {
@@ -1159,11 +1346,13 @@ function render(t) {
   drawWebs(t);
   for (const c of G.clumps) drawClump(c, t);
   drawFilter(t);
+  drawEmptyUnder(t);
   for (const b of G.bugs) drawBug(b, t);
   drawStingers(t);
   { const pp = G.player; // particles: dimmed right around the player so it never drowns in confetti
     for (const q of G.parts) { ctx.globalAlpha = clamp(q.life / q.max, 0, 1) * (hyp(q.x - pp.x, q.y - pp.y) < 30 ? 0.3 : 1); ctx.fillStyle = q.color; ctx.fillRect(q.x, q.y, q.size, q.size); } }
   ctx.globalAlpha = 1;
+  drawEmptyOver(t);
   if (G.phase !== 'dead' || G.deathT < 0.05) drawPlayer(t); // the player (and its halo, dash trail, ping) is drawn on top of everything
   ctx.restore();
   // glass rim
@@ -1178,13 +1367,14 @@ function render(t) {
 
   if (paused && G.phase === 'play') overlay({ y: 330, items: [{ t: 'PAUSED', f: 'bold 48px system-ui,sans-serif', h: 40 }, { t: pausedByBlur ? 'Window lost focus. Click here or press any key to resume' : (touchMode ? 'tap to resume' : 'press P, any key, or click to resume'), f: '16px system-ui,sans-serif', h: 20, c: '#9fb0d8' }] });
   if (G.phase === 'ready') {
-    overlay({ y: 140, items: [
-      { t: 'PROJECT VACUUM', f: 'bold 56px system-ui,sans-serif', h: 46, c: '#ff6a50' },
-      { t: 'You are a bug inside a vacuum canister. You cannot fight. Survive.', f: '17px system-ui,sans-serif', h: 28 },
-      { t: 'Bugs and dust keep dropping in. Every so often a VACUUM PULSE swells the filter danger zone and drags you in.', f: '15px system-ui,sans-serif', h: 22, c: '#9fb0d8' },
-      { t: 'Lure bugs into each other: stingers and Beetle charges hit whatever is in the way.', f: '15px system-ui,sans-serif', h: 22, c: '#9fb0d8' },
+    overlay({ y: 118, items: [
+      { t: 'PROJECT VACUUM', f: 'bold 52px system-ui,sans-serif', h: 42, c: '#ff6a50' },
+      { t: 'You are a bug inside a vacuum canister. You cannot fight. Survive.', f: '17px system-ui,sans-serif', h: 24 },
+      { t: 'A VACUUM PULSE swells the filter and drags everyone in: lure a bug close to the core and the suction beats its flee.', f: '14px system-ui,sans-serif', h: 20, c: '#9fb0d8' },
+      { t: 'Rarely the canister is EMPTIED: race to the flashing GREEN spot or be wiped. Then a heavy refill drops in.', f: '14px system-ui,sans-serif', h: 20, c: '#9fb0d8' },
+      { t: 'Lure bugs into each other: stingers and Beetle charges hit whatever is in the way.', f: '14px system-ui,sans-serif', h: 18, c: '#9fb0d8' },
     ] });
-    drawLegend(330);
+    drawLegend(288);
     ctx.textAlign = 'center'; ctx.fillStyle = '#ffd23c'; ctx.font = 'bold 22px system-ui,sans-serif';
     ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t * 5); ctx.fillText(touchMode ? 'TAP to start' : 'Press SPACE or a move key to start', CX, 560); ctx.globalAlpha = 1;
     ctx.fillStyle = '#8fa0c8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText(touchMode ? 'Drag to move, tap DASH (brief invulnerability)' : 'WASD / Arrows = move     Space = dash (brief invulnerability)     R = restart', CX, 592);
@@ -1195,12 +1385,13 @@ function render(t) {
     drawVerLabel(); drawShareBtn(); ctx.textAlign = 'center';
   }
   if (G.phase === 'dead' && G.deathT > 0.5) {
-    overlay({ y: 220, items: [
+    const lbp = lbVisible() ? lbPlace() : null;
+    overlay({ y: 220, cx: lbp && lbp.cx, maxW: lbp && lbp.maxW, items: [
       { t: 'GAME OVER', f: 'bold 54px system-ui,sans-serif', h: 44, c: '#ff6a50' },
       { t: G.cause, f: '18px system-ui,sans-serif', h: 40, c: '#ffb0a0' },
       { t: 'You survived ' + G.t.toFixed(1) + 's', f: 'bold 30px system-ui,sans-serif', h: 36 },
       { t: G.newBest ? 'NEW BEST!' : 'Best: ' + best.toFixed(1) + 's', f: 'bold 20px system-ui,sans-serif', h: 30, c: '#ffd23c' },
-      { t: 'Pulses survived: ' + G.pulseN + '   Bugs lured to death: ' + G.lureKills + '   Bugs lost to the filter: ' + G.sucked, f: '15px system-ui,sans-serif', h: 26, c: '#9fb0d8' },
+      { t: 'Pulses survived: ' + G.pulseN + '   Empties survived: ' + G.empties + '   Bugs lured to death: ' + G.lureKills + '   Bugs lost to the filter: ' + G.sucked, f: '15px system-ui,sans-serif', h: 26, c: '#9fb0d8' },
       { t: 'Webs broken: ' + websBroken() + ' (you ' + G.websPlayer + ', bugs ' + G.websBugs + ')   Bugs killed: ' + G.bugsKilled, f: '15px system-ui,sans-serif', h: 34, c: '#9fb0d8' },
       { t: 'Score: ' + G.score + ' (provisional)' + (G.newBestScore ? '  NEW BEST SCORE!' : '   Best score: ' + Math.floor(bestScore)), f: 'bold 20px system-ui,sans-serif', h: 36, c: '#8fe3a0' },
       { t: touchMode ? 'TAP to restart' : 'Press R to restart', f: 'bold 22px system-ui,sans-serif', h: 24, c: '#e6ecff' },
@@ -1211,6 +1402,7 @@ function render(t) {
   if (G.phase !== 'ready' && !(G.phase === 'dead' && G.deathT > 0.5)) { share.btn = null; share.down = null; }
   if (clog.open) drawChangelog(t); else clog.panel = null;
   ctx.restore();
+  lbSync();
   if (!clog.open) drawTouchUI(t);
 }
 
@@ -1298,9 +1490,9 @@ function setupTouch() {
   canvas.addEventListener('lostpointercapture', up, { passive: false });
   // belt and braces for iOS Safari: no scrolling, pinch/double-tap zoom, callout menu or rubber-banding
   for (const ev of ['touchstart', 'touchmove', 'gesturestart', 'gesturechange', 'gestureend', 'contextmenu']) canvas.addEventListener(ev, stop, { passive: false });
-  for (const ev of ['selectstart', 'dragstart', 'dblclick']) document.addEventListener(ev, e => { if (share.box && e.target && share.box.contains(e.target)) return; stop(e); }, { passive: false }); // no text selection / image drag / double-tap zoom in app mode
+  for (const ev of ['selectstart', 'dragstart', 'dblclick']) document.addEventListener(ev, e => { if (inUiBox(e.target)) return; stop(e); }, { passive: false }); // no text selection / image drag / double-tap zoom in app mode
   canvas.addEventListener('touchend', e => { stop(e); unlockAudio(); }, { passive: false });
-  document.addEventListener('touchmove', stop, { passive: false });
+  document.addEventListener('touchmove', e => { if (lb.card && lb.card.contains(e.target)) return; stop(e); }, { passive: false }); // the leaderboard list may scroll
   canvas.addEventListener('wheel', e => { if (clog.open) { e.preventDefault(); clogScrollBy(e.deltaY * (e.deltaMode === 1 ? 16 : 1)); } }, { passive: false });
   window.addEventListener('resize', resizeView);
   window.addEventListener('orientationchange', () => { resizeView(); setTimeout(resizeView, 120); setTimeout(resizeView, 400); });
@@ -1310,6 +1502,10 @@ function setupTouch() {
 
 // ---------- in-game changelog (condensed from CHANGELOG.md; newest first). '## ' = version heading, '- ' = bullet ----------
 const CHANGELOG = [
+  '## v0.18.0 - 2026-10-04 (~23:30 PT)',
+  '- Stronger filter pulse (risk / reward): bugs are dragged ~2.3x harder toward the filter (and much harder close to the core). During a pulse EVERY bug (Roach too) flees radially away from the filter; far out they mostly escape, but if you lure one near the core the suction wins and it dies. Bonded Moths stay with you. Roach chase AI itself is unchanged.',
+  '- Canister EMPTY: a rare, telegraphed all-clear wipe (first ~55-70 s, then every ~50-70 s; never during a pulse). Rumble, EMPTYING..., one flashing GREEN safe spot on the far side of the arena. Everything outside the spot is wiped; you die if you miss it. Surviving = +150. Then a HEAVY refill of high-level bugs drops in (late-game difficulty stays high, not a quiet reset).',
+  '- Old-arcade Top 10 on game over (once the free Cloudflare Worker in leaderboard/ is switched on): HIGH SCORES, 1ST BEN 004850 style ranks, flashing ENTER YOUR INITIALS. Off by default; offline mode unchanged.',
   '## v0.17.0 - 2026-10-04 (~21:50 PT)',
   '- You stand out: the player is a white bug with a saturated cyan rim and glow (nothing else uses it), on a dark contrast plate with an always-on halo ring, and it is drawn on top of everything. Particles fade right around you, and a small cyan arrow points at you when you are crowded.',
   '- Dashing leaves a bright trail from where you started to where you landed, then a white flash and an expanding ring at the landing spot.',
@@ -1474,6 +1670,117 @@ function drawShareBtn() {
     ctx.fillStyle = '#b8f5c8'; ctx.textAlign = 'center'; ctx.fillText(share.toast, x1 - mw / 2, my + mh / 2 + 5 * k); ctx.textAlign = 'left';
   }
 }
+// ---------- shared leaderboard (game-over card; only when LEADERBOARD_URL is set) ----------
+// GET  {url}/board -> [{name, score, time, lured, webs, ver, at}] (top 10);  POST {url}/score {name, score, time, lured, webs, ver, pulses} -> {ok, rank, top}
+// A small DOM card beside / below the game-over text: name field (remembered), Submit score, Top 10. Network failures show a toast and never block a restart.
+const LB_NAME_RE = /^[A-Za-z0-9 _-]{1,16}$/;
+const lb = { url: String(LEADERBOARD_URL || '').replace(/\/+$/, ''), card: null, els: null, board: null, forG: null, submitted: false, busy: false, mine: null, status: '', place: '' };
+function inUiBox(t) { return !!t && ((share.box && share.box.contains(t)) || (lb.card && lb.card.contains(t))); }
+function lbOnline() { return !!lb.url && typeof fetch === 'function' && typeof document.createElement === 'function'; }
+function lbVisible() { return lbOnline() && G.phase === 'dead' && G.deathT > 0.5 && !clog.open && !share.box; }
+function lbFetch(path, opts) {
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null, tm = ctl ? setTimeout(() => ctl.abort(), 7000) : 0;
+  return fetch(lb.url + path, Object.assign({ cache: 'no-store', signal: ctl ? ctl.signal : undefined }, opts || {}))
+    .then(r => r.json().catch(() => null).then(j => { clearTimeout(tm); return { status: r.status, j }; }), e => { clearTimeout(tm); throw e; });
+}
+function lbFail() { lb.status = "Couldn't reach leaderboard"; shareToast("Couldn't reach leaderboard"); lbRender(); }
+function lbLoad() {
+  lb.status = 'Loading Top 10...'; lbRender();
+  lbFetch('/board').then(({ status, j }) => { if (status !== 200 || !Array.isArray(j)) return lbFail(); lb.board = j; lb.status = j.length ? '' : 'No scores yet - be the first!'; lbRender(); }, lbFail);
+}
+function lbSubmit() {
+  if (!lb.els || lb.submitted || lb.busy || !lbVisible()) return;
+  const name = lb.els.name.value.trim().replace(/\s+/g, ' ');
+  if (!LB_NAME_RE.test(name)) { lb.status = 'Name: 1-16 letters, digits, space, _ or -'; lbRender(); return; }
+  try { localStorage.setItem('vacuum_name', name); } catch (e) {}
+  const g = G, body = { name, score: g.score, time: +g.t.toFixed(1), lured: g.lureKills, webs: websBroken(), ver: VERSION, pulses: g.pulseN, empties: g.empties || 0 };
+  lb.busy = true; lb.status = 'Submitting...'; lbRender();
+  lbFetch('/score', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body) }).then(({ status, j }) => { // text/plain: no CORS preflight
+    lb.busy = false; if (G !== g) return;
+    if (status === 200 && j && j.ok) {
+      lb.submitted = true; lb.mine = { name, score: body.score }; if (Array.isArray(j.top)) lb.board = j.top;
+      lb.status = j.rank ? 'You are #' + j.rank + ' on the board!' : (j.improved === false && j.top && j.top.some(x => String(x.name).toLowerCase() === name.toLowerCase()) ? 'Submitted - your best under that name is still higher.' : 'Submitted - not in the Top 10 this time.');
+    } else if (status === 429) lb.status = 'Too many submissions - try again in a minute.';
+    else if (status >= 400 && status < 500) { lb.status = 'Score rejected' + (j && j.error ? ': ' + j.error : ''); lb.submitted = true; }
+    else return lbFail();
+    lbRender();
+  }, () => { lb.busy = false; if (G === g) lbFail(); });
+}
+const lbOrd = i => (['1ST','2ND','3RD','4TH','5TH','6TH','7TH','8TH','9TH','10TH'][i] || String(i + 1));
+const lbPad = (n, w) => { const t = String(Math.max(0, Math.floor(+n || 0))); return t.length >= w ? t : ('0000000000' + t).slice(-w); };
+function lbBuild() {
+  // Old-arcade High Scores card: monospace / CRT neon panel. Readable on phone; the layout / placement / offline behaviour are unchanged.
+  const card = document.createElement('div'); card.id = 'lbcard';
+  card.style.cssText = 'position:fixed;z-index:15;box-sizing:border-box;padding:12px 12px 10px;border-radius:10px;' +
+    'background:linear-gradient(180deg,rgba(8,14,22,0.98),rgba(4,8,14,0.98));border:2px solid #2ff3ff;' +
+    'box-shadow:0 0 18px rgba(47,243,255,0.28), inset 0 0 40px rgba(47,243,255,0.05);' +
+    'color:#e6ecff;font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y';
+  const hd = document.createElement('div'); hd.textContent = 'HIGH SCORES';
+  hd.style.cssText = 'font-weight:bold;font-size:18px;letter-spacing:0.18em;text-align:center;color:#ffd23c;' +
+    'text-shadow:0 0 8px rgba(255,210,60,0.55);margin-bottom:4px';
+  const sub = document.createElement('div'); sub.textContent = 'TOP 10';
+  sub.style.cssText = 'text-align:center;font-size:11px;letter-spacing:0.35em;color:#8fa0c8;margin-bottom:8px';
+  const tip = document.createElement('div'); tip.textContent = 'ENTER YOUR INITIALS';
+  tip.style.cssText = 'text-align:center;font-size:12px;letter-spacing:0.12em;color:#7dff9a;margin-bottom:6px;' +
+    'animation:vacBlink 1.1s step-end infinite';
+  if (!document.getElementById('vacBlink')) { const stl = document.createElement('style'); stl.id = 'vacBlink';
+    stl.textContent = '@keyframes vacBlink{0%,100%{opacity:1}50%{opacity:0.15}}'; document.head.appendChild(stl); }
+  const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px';
+  const name = document.createElement('input'); name.type = 'text'; name.maxLength = 16; name.placeholder = 'AAA'; name.autocomplete = 'nickname'; name.setAttribute('aria-label', 'Your initials'); name.spellcheck = false;
+  try { name.value = localStorage.getItem('vacuum_name') || ''; } catch (e) {}
+  name.style.cssText = 'flex:1;min-width:0;font:16px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:8px;border-radius:6px;' +
+    'border:1px solid #2ff3ff;background:#05080f;color:#2ff3ff;text-transform:uppercase;letter-spacing:0.12em;-webkit-user-select:text;user-select:text';
+  const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'INSERT COIN';
+  btn.style.cssText = 'min-height:40px;font:bold 12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:0 10px;border-radius:6px;' +
+    'border:1px solid #ffd23c;background:#2a1e00;color:#ffd23c;white-space:nowrap;letter-spacing:0.06em';
+  btn.addEventListener('click', e => { e.stopPropagation(); lbSubmit(); });
+  const me = document.createElement('div'); me.id='lbme'; me.style.cssText = 'color:#8fa0c8;margin-bottom:4px;font-size:12px;letter-spacing:0.04em';
+  const st = document.createElement('div'); st.id='lbst'; st.style.cssText = 'color:#ffb0a0;min-height:16px;margin-bottom:6px;font-size:12px';
+  const list = document.createElement('ol'); list.style.cssText = 'margin:0;padding:0;list-style:none';
+  row.appendChild(name); row.appendChild(btn);
+  for (const el of [hd, sub, tip, row, me, st, list]) card.appendChild(el);
+  for (const ev of ['pointerdown', 'pointerup', 'click', 'touchstart', 'touchend', 'wheel']) card.addEventListener(ev, e => e.stopPropagation());
+  document.body.appendChild(card); lb.card = card; lb.els = { name, btn, me, st, list, tip }; lb.place = '';
+}
+function lbRender() {
+  if (!lb.els) return;
+  const E = lb.els;
+  E.me.textContent = 'YOUR SCORE  ' + lbPad(G.score, 6) + '   BEST  ' + lbPad(bestScore, 6);
+  E.st.textContent = lb.status; E.st.style.color = /^You are #/.test(lb.status) ? '#8fe3a0' : '#ffb0a0';
+  E.btn.disabled = lb.submitted || lb.busy; E.btn.style.opacity = E.btn.disabled ? '0.5' : '1';
+  E.btn.textContent = lb.submitted ? 'CREDITED' : lb.busy ? 'SENDING...' : 'INSERT COIN';
+  E.name.disabled = lb.submitted;
+  if (E.tip) E.tip.style.display = lb.submitted ? 'none' : '';
+  while (E.list.firstChild) E.list.removeChild(E.list.firstChild);
+  (lb.board || []).slice(0, 10).forEach((r, i) => {
+    const li = document.createElement('li'), mine = lb.mine && r.name === lb.mine.name && r.score === lb.mine.score;
+    li.style.cssText = 'display:flex;gap:8px;align-items:baseline;padding:3px 0;border-top:1px solid rgba(47,243,255,0.12);' +
+      'font-size:13px;letter-spacing:0.04em' + (mine ? ';color:#2ff3ff;font-weight:bold;text-shadow:0 0 6px rgba(47,243,255,0.55)' : ';color:#e6ecff');
+    const a = document.createElement('span'); a.textContent = lbOrd(i); a.style.cssText = 'width:36px;color:' + (i < 3 ? '#ffd23c' : '#8fa0c8');
+    const n = document.createElement('span'); n.textContent = String(r.name).toUpperCase(); // textContent: names are never parsed as HTML
+    n.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    const sc = document.createElement('span'); sc.textContent = lbPad(r.score, 6); sc.style.cssText = 'font-weight:bold;color:#7dff9a';
+    li.appendChild(a); li.appendChild(n); li.appendChild(sc); E.list.appendChild(li);
+  });
+}
+// Card rect in CSS px + where the game-over text goes. Wide screens: card on the right, text centred in the space to its left. Tall screens: card below the text.
+// The bottom row (changelog label + Share button) always stays clear.
+function lbPlace() {
+  const L = safe.l + 10, R = cssW - safe.r - 10, Tt = safe.t + 10;
+  const B = cssH - safe.b - Math.max(4 * viewScale, 8) - Math.max(30 * viewScale, 44) - 8;
+  const availW = R - L, cw = Math.min(300, Math.max(230, availW * 0.32)), toL = x => VX0 + x / viewScale;
+  const textBottom = (510 - VY0) * viewScale, by = Math.max(Tt, textBottom + 8);
+  if (availW < 600 * viewScale + cw + 24 && B - by >= 170) { const w = Math.min(380, availW); return { x: L + (availW - w) / 2, y: by, w, h: Math.min(B - by, 440), cx: 0, maxW: 0 }; }
+  const x = R - cw, h = Math.min(B - Tt, 440), y = Tt + Math.max(0, (B - Tt - h) / 2), right = x - 12;
+  return { x, y, w: cw, h, cx: toL((L + right) / 2), maxW: Math.max(200, (right - L) / viewScale - 16) };
+}
+function lbSync() {
+  if (!lbVisible()) { if (lb.card) { try { lb.card.remove(); } catch (e) {} lb.card = null; lb.els = null; } return; }
+  if (!lb.card) lbBuild();
+  if (lb.forG !== G) { lb.forG = G; lb.submitted = false; lb.busy = false; lb.mine = null; lb.status = ''; lbLoad(); } else if (!lb.els.list.firstChild && !lb.status) lbRender();
+  const P = lbPlace(), key = [P.x, P.y, P.w, P.h].map(v => Math.round(v)).join(',');
+  if (key !== lb.place) { lb.place = key; const s = lb.card.style; s.left = Math.round(P.x) + 'px'; s.top = Math.round(P.y) + 'px'; s.width = Math.round(P.w) + 'px'; s.maxHeight = Math.round(P.h) + 'px'; lbRender(); }
+}
 function drawChangelog(t) {
   clogLayout(); clogWrap();
   ctx.fillStyle = 'rgba(3,4,8,0.88)'; ctx.fillRect(VX0 - 2, VY0 - 2, VW + 4, VH + 4);
@@ -1510,11 +1817,15 @@ function keyCode(e) {
   return KEYFALLBACK[k] || e.code || '';
 }
 let keyboardSeen = false, pausedByBlur = false;
-function focusGame() { if (share.box) return; try { window.focus(); if (document.body && document.body.focus) document.body.focus({ preventScroll: true }); canvas.focus({ preventScroll: true }); } catch (e) {} }
+function focusGame() { if (share.box || (lb.card && document.activeElement && lb.card.contains(document.activeElement))) return; try { window.focus(); if (document.body && document.body.focus) document.body.focus({ preventScroll: true }); canvas.focus({ preventScroll: true }); } catch (e) {} }
 function resumeGame() { if (paused) { paused = false; pausedByBlur = false; last = performance.now(); } }
 function onKeyDown(e) {
   if (e.__vacHandled) return; e.__vacHandled = true;       // window + document capture both fire: handle once
   const code = keyCode(e);
+  if (lb.card && document.activeElement && lb.card.contains(document.activeElement)) { // typing a name: keys go to the field, never to the game
+    if (code === 'Enter' || code === 'NumpadEnter') { e.preventDefault(); lbSubmit(); } else if (code === 'Escape') { e.preventDefault(); document.activeElement.blur(); lb.focusOk = false; focusGame(); }
+    return;
+  }
   if (share.box) { if (code === 'Escape') { e.preventDefault(); hideUrlBox(); } return; } // the link box is modal: typing / Ctrl+C go to it, never to the game
   if (!keyboardSeen) { keyboardSeen = true; }
   if (clog.open) { // changelog panel is modal: it handles its own keys and never starts / controls the game
@@ -1541,8 +1852,8 @@ if (typeof window !== 'undefined') {
   window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; touchReset(); if (G.phase === 'play' && !paused) { paused = true; pausedByBlur = true; } });
   window.addEventListener('focus', () => { for (const k in keys) keys[k] = false; });
   if (typeof document.addEventListener === 'function') {
-    document.addEventListener('pointerdown', () => { focusGame(); if (pausedByBlur) resumeGame(); }, true);
-    document.addEventListener('click', () => { focusGame(); if (pausedByBlur) resumeGame(); }, true);
+    document.addEventListener('pointerdown', e => { if (inUiBox(e.target)) return; focusGame(); if (pausedByBlur) resumeGame(); }, true);
+    document.addEventListener('click', e => { if (inUiBox(e.target)) return; focusGame(); if (pausedByBlur) resumeGame(); }, true);
   }
   try { if (document.body) document.body.setAttribute('tabindex', '0'); canvas.setAttribute('tabindex', '0'); } catch (e) {}
   window.addEventListener('load', focusGame); setTimeout(focusGame, 0);
@@ -1564,7 +1875,7 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // test hook (used by headless checks)
-window.__vac = { VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb };
+window.__vac = { VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, lb, lbPlace, lbSubmit, setLeaderboardURL(u) { lb.url = String(u || '').replace(/\/+$/, ''); }, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb, pullEnv, pullVec, bugSuck, avoidVec, startEmpty, doEmpty, pickSafeSpot, updateEmpty, startPulse, planRefill, makeBug, killBug };
 })();
 </script>
 </body>
