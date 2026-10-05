@@ -5,27 +5,35 @@ All notable changes to **Project Vacuum** are listed here, newest first. The for
 The in-game version is the `VERSION` constant in `prototype/game.js` (shown small, as a tappable 'changelog' label, on the start and game-over screens,
 stored as `version` in each `vacuum_runs` record, and exposed as `window.__vac.VERSION`).
 
-This history was reconstructed after the fact. All dates are 2026-10-01 and the times (PT) are approximate.
+Early history was reconstructed after the fact.
 
 **Play it:** published to GitHub Pages at https://silvertibby.github.io/project-vacuum/ (repo: https://github.com/Silvertibby/project-vacuum).
 Note: the Pages build tracks `index.html` on `main`. See the repo for whether the latest version has been pushed yet.
 
-## [0.18.3] - 2026-10-04 (~23:45 PT)
+## [0.19.0] - 2026-10-04
+### Changed
+- **No more timed empties.** The canister never empties on its own timer any more (the 55–70 s / 50–70 s schedule is gone).
+- **EMPTY pickup (player-triggered).** One per run (`T.empty.charges = 1`; no way to earn more yet). A green canister icon sits in a random corner of the arena from the start (top corners only on touch screens, where the bottom ones sit under MOVE / DASH; inset 54 px; a short "touch to empty the canister (1 use)" hint for the first 9 s). Touching it triggers the empty and uses it up. It is locked (dimmed, "EMPTY (after pulse)") during a pulse, its warning, or an empty / refill: touching it then does nothing (standing on it fires it as soon as the lock lifts). Dust clumps are kept off it (gently slid away; scatter and trickle avoid it).
+- **On trigger:** same sequence as before: 5.2 s telegraph, then the wipe. The GREEN safe spot is now the farthest perimeter point on the opposite side from the player (reach raised 720 → 860 px, so from a corner it is usually the opposite corner). Any overlap with the spot = safe; bonded Moths live/die with you. Heavy refill afterwards (unchanged: `min(40, 10 + t/8)` bugs as if 60 s later); pulses keep their count, so difficulty does not reset. The next pulse is still pushed past the empty + refill.
+- **HUD:** an EMPTY chip at the right of the stats row shows the icon state: `EMPTY x1` (ready), `EMPTY wait` (locked), `EMPTY used` (greyed, slashed). Title text, legend and in-game changelog explain the pickup. Run records add `emptyUsed`.
+- **Suction fix (bugs).** Stronger pull, weaker flee: `bugPull` 52 + 7·lvl, cap 120 px/s (was 42 + 7·lvl, cap 105); near-core boost +150% linear within 270 px (`bugNear` 1.5, `bugNearR` 270; was +90% within 190); flee 1.2× base (was 1.3×). Net pull is now inward inside ~234 px of the filter (was ~127 px) and outward beyond it. Net (mass 1, pulse 1 → cap): 100 px +41 → +89, 150 px +26 → +56, 200 px +10 → +23, 270 px+ −11 → −24 px/s. So close and mid-range bugs (especially ones you lure near) slowly lose and spiral into the core; far bugs still mostly escape. Roach chase AI, non-Roach avoidance outside a pulse, player pull, and bonded-Moth exemption are unchanged.
+
+## [0.18.3] - 2026-10-04
 
 - **Title High Scores:** a clean "High Scores" button on the START screen opens Top 10 (GET `LEADERBOARD_URL/board` when the title shows / when opened). Failed fetch or offline → hide / show "offline".
 - **Game-over High Scores:** when the shared board is on, a clean modern High Scores panel **replaces** the game-over screen (run summary, Top 10, name + Submit, Play again). No CRT / arcade side card.
 - **Empty overlap-safe:** player is safe if any part of the player circle intersects the green spot (`distance < safeR + player.r`), not center-only. Bonded moths still live/die with the player.
 - **Empty telegraph:** warn time 5.2 s (was 4.2 s). Empty timing gaps unchanged (first 55–70 s, then 50–70 s, delay if pulse).
 
-## [0.18.2] - 2026-10-04 (~23:40 PT)
+## [0.18.2] - 2026-10-04
 ### Changed
 - Shared leaderboard now ranks by **survival time** (longest first, best time per name); the arcade card shows times as `1ST  BEN  01:42.3` and `YOUR TIME / BEST`. Score and stats are still submitted and stored for display; score plausibility is now a soft check (implausible → stored as `null`, never rejected). Worker redeployed.
 
-## [0.18.1] - 2026-10-04 (~23:20 PT)
+## [0.18.1] - 2026-10-04
 ### Changed
 - Enable shared arcade leaderboard URL: `LEADERBOARD_URL` = `https://project-vacuum-leaderboard.silvertibby.workers.dev` (Worker deployed, KV namespace id set in `leaderboard/wrangler.toml`). No gameplay changes.
 
-## [0.18.0] - 2026-10-04 (~23:30 PT)
+## [0.18.0] - 2026-10-04
 Strategy pass + shared arcade leaderboard. Live Pages was still on v0.17, so this ships as one clean 0.18.
 ### Added
 - **Stronger filter pulse (risk / reward).** Bug pull is ~2.3x the old nudge (`bugPull` 42 + 7·lvl, cap 105 px/s; was 18 + 3·lvl, cap 45), with an extra near-core boost (`bugNear` 0.9 within 190 px). Player pull caps stay 100→170; near-core boost is now +65% within 160 px (was +50% within 150). During a pulse (`pullEnv > 0`) EVERY bug — Roach included — also FLEES radially away from the filter at 1.3× its base pull; bonded Moths and spawn-protected bugs are exempt. Far out, flee beats pull and bugs escape; inside ~127 px of the filter centre the near-core pull wins, so a bug you lure near the filter during suction slowly loses and dies on the core. Non-Roach `avoidVec` still runs outside a pulse; during a pulse it fades with the envelope and the flee takes over. Roach chase AI itself is untouched. Bugs still die on core contact.
@@ -36,7 +44,7 @@ Strategy pass + shared arcade leaderboard. Live Pages was still on v0.17, so thi
 - Start screen and legend mention the stronger pulse lure and the canister empty.
 ### Tests
 - `leaderboard/test.mjs` (worker) and `chrome/lb.js` (arcade card, offline mode) plus new `empty.js` / updates to `pulse.js` for stronger drag, flee-but-suck, empty telegraph + opposite safe spot + wipe + player die outside + heavy refill.
-## [0.17.0] - 2026-10-04 (~21:50 PT)
+## [0.17.0] - 2026-10-04
 Playtest feedback from Ben: he loses track of himself in busy late game (especially after a dash); other bugs should be a soft but clearly visible pastel palette
 while he and his recruited Moths pop; and webs can go after a single pass.
 ### Changed
@@ -59,7 +67,7 @@ while he and his recruited Moths pop; and webs can go after a single pass.
 ### Tests
 - `web.js` updated for one-pass webs (player and bug passes remove multi-layer webs, counted once; more layers still hold bugs longer; linked chain keeps uncrossed webs; Spider never removes).
 
-## [0.16.0] - 2026-10-03 (~20:50 PT)
+## [0.16.0] - 2026-10-03
 ### Added
 - **Share button** on the start screen and the game-over screen (bottom right, a blue pill with a share icon; at least 44 css px tall, sized up on small screens, kept inside the safe areas, clear of the changelog label).
   Tap / click it to share the game: `navigator.share({title: 'Project Vacuum', text: 'Try this bug survival game!', url})` when available (iOS Safari and app mode); otherwise the link is copied
@@ -70,7 +78,7 @@ while he and his recruited Moths pop; and webs can go after a single pass.
 ### Tests
 - New `chrome/share.js`: mocks `navigator.share` / `clipboard` / `execCommand`; checks the exact share args, silent cancel, each fallback, the URL box, toast timing, no page errors, and that the button is tappable (touch) on 390x844 and 844x390 and on the game-over screen.
 
-## [0.15.0] - 2026-10-03 (~20:30 PT)
+## [0.15.0] - 2026-10-03
 Playtest feedback from Ben: try weaker-but-more-frequent vacuum pulses.
 ### Changed
 - **More frequent pulses.** First pulse at 20 s (was 28 s). The gap between pulse starts is `min(40, 18 + 2n)` after pulse n: 20, 22, 24, 26 ... 40 s (cap reached at pulse 11);
@@ -84,7 +92,7 @@ Playtest feedback from Ben: try weaker-but-more-frequent vacuum pulses.
 - New `pulse.js` (schedule, gaps, warning, pull strength, wave size and spawn protection over a 330 s run). `web.js` score check now reads `T.score.pulse`.
 - Harness (dodge-bot, N=40): median survival 49.7 s, 1.8 pulses per run (was 38.1 s median / 0.9 pulses in the same session).
 
-## [0.14.0] - 2026-10-02 (~14:45 PT)
+## [0.14.0] - 2026-10-02
 Playtest feedback from Ben: early friendly fire should kill bugs easily, debris needs a way to disappear, and the play field should be a rectangle that
 uses more of the screen. (Roach chase and the pulse rearrange behaviour are loved, so they are untouched. Webs are untouched.)
 ### Changed
@@ -111,7 +119,7 @@ uses more of the screen. (Roach chase and the pulse rearrange behaviour are love
 - New `arena.js` (arena size per viewport and safe area, walls, 130 s containment on 7 viewports, spawns, resize / rotation refit, hp ramp, friendly fire, debris durability,
   pulse eat chance, debris count). `web.js`, `t.js` updated for the rectangle.
 
-## [0.13.0] - 2026-10-01 (~19:00 PT)
+## [0.13.0] - 2026-10-01
 ### Added
 - **App mode (iPhone "Add to Home Screen").** From https://silvertibby.github.io/project-vacuum/ in Safari, Share > Add to Home Screen now
   gives the game a proper icon and name ("Vacuum") and launches it full screen with no Safari bar.
@@ -125,7 +133,7 @@ uses more of the screen. (Roach chase and the pulse rearrange behaviour are love
   of the existing no-scroll, no-bounce, no-pull-to-refresh setup). The existing safe-area handling positions the HUD and touch buttons inside the notch and
   home-indicator insets, which matters with the translucent status bar. No gameplay changes.
 
-## [0.12.0] - 2026-10-01 (~16:00 PT)
+## [0.12.0] - 2026-10-01
 ### Changed
 - **Gentler, readable pulse scatter.** Dust clumps and webs no longer fly and bounce. Each one slides a short, eased distance
   (60-150 px over ~1.5-2 s, friction-like stop) to a new spot. Targets are checked up front (inside the arena, outside the largest
@@ -145,7 +153,7 @@ uses more of the screen. (Roach chase and the pulse rearrange behaviour are love
   panel (mouse wheel, touch drag, arrow keys / W / S / PageUp / PageDown) with the condensed history, closed by the Close button, Esc, C or a
   tap outside it. It is modal, so it never starts the game or drives the controls. `window.__vac.CHANGELOG` holds the text.
 
-## [0.11.0] - 2026-10-01 (~15:30 PT)
+## [0.11.0] - 2026-10-01
 ### Changed
 - The vacuum pulse no longer sucks dust clumps and webs into the filter. It now **scatters** them: a swirl plus random impulses
   shove each one outward or sideways, they bounce off the rim and the danger zone, fly with motion trails, and settle at new
@@ -157,7 +165,7 @@ uses more of the screen. (Roach chase and the pulse rearrange behaviour are love
 - This changelog (also copied into `prototype/` and the tarball) and a "Version history" pointer in `PITCH.md`.
 - Legend line about the pulse blasting dust and webs around.
 
-## [0.10.0] - 2026-10-01 (~15:00 PT)
+## [0.10.0] - 2026-10-01
 ### Added
 - **Stacking webs:** a Spider laying a web on top of an existing one adds a layer (strength, cap 4). Each pass by the player
   or a bug removes one layer and the web only tears at 0. Higher layers slow the player more (50% on layer 1, up to 65%),
@@ -170,13 +178,13 @@ uses more of the screen. (Roach chase and the pulse rearrange behaviour are love
 ### Unchanged
 - Survival time is still the main score. Roach chase code untouched.
 
-## [0.9.1] - 2026-10-01 (~14:30 PT)
+## [0.9.1] - 2026-10-01
 ### Changed
 - **Moth is a shield on the player only.** A recruited Moth is an invulnerable escort: it ignores stingers, charges, lunges, webs,
   bug fights and the filter. It is consumed only when a lethal hit actually reaches the player (shield-break effect, attacker
   stunned, brief grace window). An unrecruited Moth shields nobody.
 
-## [0.9.0] - 2026-10-01 (~14:00 PT)
+## [0.9.0] - 2026-10-01
 ### Changed
 - **Persistent webs:** webs no longer time out. They stay until crossed; a caught bug is stuck for about 1 s and then the web tears;
   the player is slowed and tears the web on leaving or after 1 s. Cap of 120 webs (oldest dropped).
@@ -185,43 +193,43 @@ uses more of the screen. (Roach chase and the pulse rearrange behaviour are love
   re-focused on load/click, blur pauses with a clear "Window lost focus" overlay (any key or click resumes), a real keydown clears
   touch mode, and the start screen shows "keys: ok" once a key is seen.
 
-## [0.8.0] - 2026-10-01 (~13:15 PT)
+## [0.8.0] - 2026-10-01
 ### Added
 - **iPhone / touch controls:** floating joystick, DASH button with cooldown ring, pause button, responsive scaling for portrait and
   landscape at any pixel ratio, safe-area insets, audio unlock on first touch, no scroll / zoom / rubber-banding.
 
-## [0.7.0] - 2026-10-01 (~12:30 PT)
+## [0.7.0] - 2026-10-01
 ### Changed
 - **Attacks overhaul:** per-type aggro radius and leash, **friendly fire** (stingers, charges and lunges hit whatever is in the way),
   Wasp stingers, Spider webs (slow the player 50%), Beetle is charge-only, even spawn mix, HP rebalance.
 ### Unchanged
 - Roach chase: Roaches still always chase the player.
 
-## [0.6.0] - 2026-10-01 (~12:00 PT)
+## [0.6.0] - 2026-10-01
 ### Changed
 - Moths idle in place until touched (recruit by touch) instead of flocking, with a pulsing glow and a slow beacon ring so they can be found.
 
-## [0.5.0] - 2026-10-01 (~11:30 PT)
+## [0.5.0] - 2026-10-01
 ### Changed
 - **Suction reworked into a danger zone:** only a weak nudge on bugs, a lethal filter core with a visible orange hazard zone that swells on a pulse,
   4 s of spawn protection for new bugs, easier opening population.
 ### Removed
 - Suction resistance (armor rings) from 0.2.0.
 
-## [0.4.0] - 2026-10-01 (~11:00 PT)
+## [0.4.0] - 2026-10-01
 ### Changed
 - More bugs and debris; much rarer pulses (first at 28 s, gaps of 32 s growing toward a 70 s cap).
 - Bug cap 45, clump cap 16, time-based escalation of the trickle spawns.
 
-## [0.3.0] - 2026-10-01 (~10:30 PT)
+## [0.3.0] - 2026-10-01
 ### Changed
 - Pulse gaps grow longer over the run; continuous trickle spawns between pulses; bigger spawn waves per pulse.
 
-## [0.2.0] - 2026-10-01 (~10:15 PT)
+## [0.2.0] - 2026-10-01
 ### Added
 - Suction resistance for later-spawned bugs (armor rings).
 
-## [0.1.0] - 2026-10-01 (~10:00 PT)
+## [0.1.0] - 2026-10-01
 ### Added
 - Initial prototype: five bug types (Roach, Wasp, Spider, Beetle, Moth) in a circular canister with a filter; vacuum pulses as a
   storm-circle style event with a telegraph (rim flash, contracting rings, countdown, spawn markers); dash with brief i-frames;

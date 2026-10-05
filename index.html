@@ -35,7 +35,7 @@
 // Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
 (() => {
 'use strict';
-const VERSION = '0.18.3'; // keep in sync with CHANGELOG.md
+const VERSION = '0.19.0'; // keep in sync with CHANGELOG.md
 // Shared online leaderboard (Cloudflare Worker, see leaderboard/README.md). '' = offline: local best only, no network calls.
 // Set to the Worker URL, e.g. 'https://project-vacuum-leaderboard.<subdomain>.workers.dev' (no trailing slash), to show High Scores on title + game over.
 const LEADERBOARD_URL = 'https://project-vacuum-leaderboard.silvertibby.workers.dev';
@@ -63,18 +63,21 @@ const T = {
   // Pulls (px/s toward filter, scaled by pulse envelope):
   playerPull: n => Math.min(170, 100 + 10 * T.lvl(n)),       // < player speed 215, but up to +65% near the core (v0.18: was +50%) => dash out
   playerNear: 0.65, playerNearR: 160,                         // player pull x(1 + 0.65 * (160 - d) / 160) within 160 px of the filter centre
-  // v0.18 STRONGER PULSE (risk / reward): bugs are clearly dragged (~2.3x the old 18 -> 45 px/s nudge), and much harder close to the core.
-  // During a pulse EVERY bug (Roach included; bonded Moths and spawn-protected bugs excepted) also FLEES radially away from the filter at bugFleeK x its base pull.
-  // Far out, flee (1.3x) beats pull (1.0x): bugs escape. Inside ~127 px of the filter centre the near-core pull (up to 1.9x) wins, so a bug you lure
-  // close to the filter during a pulse slowly loses and dies on the core. Both scale with the pulse envelope and the bug's mass (crossover radius is the same for every type).
-  bugPull: n => Math.min(105, 42 + 7 * T.lvl(n)),            // 45.5 px/s at pulse 1 -> 105 cap (was 19.5 -> 45)
-  bugNear: 0.9, bugNearR: 190,                                // bug pull x(1 + 0.9 * (190 - d) / 190) near the core
-  bugFleeK: 1.3,                                              // flee speed = 1.3 x base pull (x mass, x envelope)
-  // v0.18 CANISTER EMPTY: a rare, telegraphed all-clear wipe. First at 55-70 s, then every 50-70 s (never during / right before a pulse:
-  // it waits for the pulse to end + pulseGap). 5.2 s telegraph (rumble, EMPTYING..., one flashing GREEN safe spot on the far side from the player,
-  // within `reach` px so it can be reached). Then everything outside the spot is wiped (bugs, dust, webs, stingers); the player dies outside it.
+  // PULSE SUCTION on bugs (v0.19 retune: stronger pull, weaker flee). During a pulse every bug (Roach included; bonded Moths and spawn-protected bugs
+  // excepted) is pulled toward the filter AND flees radially away from it; net = pull - flee is added on top of its AI velocity (Roach chase untouched).
+  //   pull = base * (1 + bugNear * max(0, (bugNearR - d) / bugNearR)),  flee = base * bugFleeK   (both x mass x envelope)
+  // Crossover (net 0) at d = bugNearR * (1 - (bugFleeK - 1) / bugNear) = 234 px. Inside it the pull wins and the loss accelerates toward the core
+  // (close + mid range = death spiral, slow at ~200 px, fast near the core); beyond it the flee wins (net -0.2 x base) so far bugs mostly escape.
+  // v0.18 was 42+7*lvl cap 105, near 0.9 / 190 px, flee 1.3: crossover only 127 px, so mid-range bugs out-fled the pull.
+  bugPull: n => Math.min(120, 52 + 7 * T.lvl(n)),            // 55.5 px/s at pulse 1 -> 120 cap (v0.18: 45.5 -> 105)
+  bugNear: 1.5, bugNearR: 270,                                // bug pull x(1 + 1.5 * (270 - d) / 270) within 270 px of the filter centre (v0.18: 0.9 / 190)
+  bugFleeK: 1.2,                                              // flee speed = 1.2 x base pull (v0.18: 1.3)
+  // CANISTER EMPTY (v0.19: no longer on a timer). It only happens when YOU trigger it by touching the EMPTY pickup (one per run, `charges`),
+  // which sits in a random corner of the arena from the start. Locked (dimmed, touching does nothing) during a pulse, its warning, or an empty / refill.
+  // 5.2 s telegraph (rumble, EMPTYING..., one flashing GREEN safe spot on the far side from the player, as far as practical within `reach`).
+  // Then everything outside the spot is wiped (bugs, dust, webs, stingers); the player dies outside it (any overlap with the spot = safe).
   // Surviving = +150 score. Then a HEAVY refill: min(40, 10 + t/8) bugs spawned as if 60 s later in the run (tougher), plus dust, over 2.5 s.
-  empty: { first0: 55, first1: 70, gap0: 50, gap1: 70, warn: 5.2, safeR: 64, inset: 48, reach: 720, pulseGap: 2.5, after: 1.2,
+  empty: { charges: 1, pickR: 15, pickInset: 54, pickTouch: 6, hintT: 9, warn: 5.2, safeR: 64, inset: 48, reach: 860, after: 1.2,
     refillBase: 10, refillPerS: 1 / 8, refillMax: 40, refillLvl: 60, refillDur: 2.5, refillClumps: 5, refillKeep: 220 },
   // SCATTER (gentle): a pulse slides every dust clump and every web CLUSTER 60-150 px to a new spot over ~1.5-2 s (eased, no bouncing). Webs within
   // webLinkR of each other move together as one rigid unit. Targets are validated up front (arena, outside the max danger zone, off the player spawn).
@@ -262,7 +265,7 @@ function newGame(phase) {
     player: { x: CX, y: spawnY(), vx: 0, vy: 0, r: T.playerR, dashT: 0, dashCd: 0, dx: 0, dy: -1, ifr: 0, trail: [] },
     bugs: [], clumps: [], parts: [], texts: [], streaks: [], webs: [], slides: [], rings: [], stingers: [], tally: {},
     lureKills: 0, sucked: 0, bugsKilled: 0, websPlayer: 0, websBugs: 0, score: 0, newBestScore: false, shake: 0, cause: '', newBest: false, deathT: 0, lastBeep: -1,
-    nextEmptyAt: rnd(T.empty.first0, T.empty.first1), empty: null, emptyFx: null, empties: 0, emptiedBugs: 0, refill: [], rumbleT: 0,
+    emptyCharges: T.empty.charges, emptyUsed: 0, pick: { corner: Math.floor(rnd(4)), lockMsgT: 0 }, empty: null, emptyFx: null, empties: 0, emptiedBugs: 0, refill: [], rumbleT: 0,
   };
   for (let i = 0; i < 44; i++) { const a = rnd(TAU); G.streaks.push({ a, r: rnd(G.filterR, edgeR(a)), l: rnd(10, 30) }); }
   // opening population
@@ -369,7 +372,7 @@ function trickleSpawn(dt) {
       const p = G.player, rz = G.filterR + T.zoneBase + T.zoneSwell + 50;
       for (let k = 0; k < 40; k++) {
         const [x, y] = arenaPoint(34);
-        if (hyp(x - CX, y - CY) > rz && hyp(x - p.x, y - p.y) > 70) { const c = newClump(x, y, rnd(13, 22)); G.clumps.push(c); break; }
+        if (hyp(x - CX, y - CY) > rz && hyp(x - p.x, y - p.y) > 70 && !pickBlocked(x, y, 22)) { const c = newClump(x, y, rnd(13, 22)); G.clumps.push(c); break; }
       }
     }
   }
@@ -407,9 +410,9 @@ function startPulse() {
   G.shake = 2; beep(80, 0.5, 'sawtooth', 0.08);
 }
 
-// ---------- canister EMPTY (v0.18): rare, telegraphed all-clear wipe + heavy refill ----------
-// The safe spot: one point on the far side of the arena from the player (a pocket / corner near the opposite wall), out of the filter's danger zone,
-// and at most T.empty.reach px away so it can always be reached in the telegraph.
+// ---------- canister EMPTY (v0.18; v0.19: player-triggered via the corner pickup): telegraphed all-clear wipe + heavy refill ----------
+// The safe spot: the FARTHEST point on the opposite side of the arena from the player (a pocket / corner near the opposite wall), out of the filter's
+// danger zone, and at most T.empty.reach px away (v0.19: 860, was 720) so it can still be reached in the 5.2 s telegraph.
 function pickSafeSpot() {
   const E = T.empty, p = G.player, m = E.inset, rz = maxZone() + E.safeR + 10;
   const ox = CX - p.x, oy = CY - p.y, od = hyp(ox, oy), x0 = AX0 + m, x1 = AX1 - m, y0 = AY0 + m, y1 = AY1 - m, w = x1 - x0, h = y1 - y0, per = 2 * (w + h);
@@ -425,6 +428,32 @@ function pickSafeSpot() {
   if (!pool.length) pool = cands.length ? cands : [{ x: x0, y: y0, dp: 0 }];
   const far = Math.max(...pool.map(c => c.dp)), top = pool.filter(c => c.dp >= far - 40), c = top[Math.floor(rnd(top.length))] || pool[0];
   return [c.x, c.y];
+}
+// v0.19 EMPTY PICKUP: one per run, in a corner (corner index kept so it follows arena resizes). Touch it to trigger the empty.
+function pickPos() { const m = T.empty.pickInset, c0 = G.pick ? G.pick.corner : 0, c = touchMode && c0 >= 2 ? 3 - c0 : c0; // touch: bottom corners sit under MOVE / DASH, so use the top corner on the same side
+  return [c === 0 || c === 3 ? AX0 + m : AX1 - m, c < 2 ? AY0 + m : AY1 - m]; } // 0 TL, 1 TR, 2 BR, 3 BL
+function emptyLocked() { return !!(G.empty || G.emptyFx || G.refill.length || G.pulseT >= 0 || G.warned); } // not during a pulse / its warning / another empty or its refill
+function emptyState() { return G.emptyCharges > 0 ? (emptyLocked() ? 'wait' : 'ready') : 'used'; }
+function tryPickup(dt) {
+  const P = G.pick, p = G.player; if (!P || G.emptyCharges <= 0) return false;
+  P.lockMsgT = Math.max(0, P.lockMsgT - dt);
+  const [x, y] = pickPos(); if (hyp(p.x - x, p.y - y) >= T.empty.pickR + p.r + T.empty.pickTouch) return false;
+  if (emptyLocked()) { if (P.lockMsgT <= 0 && !G.empty) { floatText(x, y - 24, G.pulseT >= 0 || G.warned ? 'EMPTY: wait for the pulse to end' : 'EMPTY: not yet', '#b8c4dc'); P.lockMsgT = 1.4; } return false; }
+  G.emptyCharges--; G.emptyUsed++;
+  burst(x, y, '#7dff9a', 22, 170, 0.7); floatText(x, y - 24, 'EMPTY TRIGGERED!', '#7dff9a'); beep(660, 0.12, 'square', 0.05);
+  startEmpty();
+  return true;
+}
+// keep dust clumps from sitting on the pickup (you must be able to reach it): gently slide them off, toward the arena centre (max 120 px/s)
+function pickBlocked(x, y, r) { if (!G || G.emptyCharges <= 0 || !G.pick) return false; const [px, py] = pickPos(); return hyp(x - px, y - py) < r + T.empty.pickR + 6; }
+function clearPickup(dt) {
+  if (G.emptyCharges <= 0) return;
+  const [x, y] = pickPos(), keep = T.empty.pickR + 6, ux = CX - x, uy = CY - y, ul = hyp(ux, uy) || 1;
+  for (const c of G.clumps) {
+    if (c.dead || c.mv) continue;
+    const d = hyp(c.x - x, c.y - y), need = c.r + keep - d; if (need <= 0) continue;
+    const s = Math.min(need + 0.5, 120 * dt); c.x += ux / ul * s; c.y += uy / ul * s;
+  }
 }
 function startEmpty() {
   const E = T.empty, [x, y] = pickSafeSpot();
@@ -454,7 +483,6 @@ function doEmpty() {
   if (p.webTouched) p.webTouched = p.webTouched.filter(w => !w.dead);
   G.spawnPlan = [];
   G.empty = null; G.emptyFx = { t: 0, x: S.x, y: S.y, r: S.r, survived: safeP };
-  G.nextEmptyAt = G.t + rnd(E.gap0, E.gap1);
   G.shake = 18; beep(45, 1.0, 'sawtooth', 0.11); beep(140, 0.35, 'triangle', 0.05);
   for (let i = 0; i < 36; i++) { const [x, y] = arenaPoint(10); burst(x, y, i % 3 ? '#8d8678' : '#cfc6b0', 3, 220, 0.9); } // aftershock: dust everywhere
   burst(S.x, S.y, '#7dff9a', 30, 200, 0.9);
@@ -493,12 +521,7 @@ function updateEmpty(dt) {
     if (G.empty.t >= E.warn) doEmpty();
     return;
   }
-  if (G.t < G.nextEmptyAt) return;
-  if (G.pulseT >= 0 || G.warned) { // never during a pulse or its warning: wait for the pulse to end + a short gap
-    const end = G.pulseT >= 0 ? G.t + (G.pulseDur - G.pulseT) : G.nextPulseAt + T.pullDur(G.pulseN + 1);
-    G.nextEmptyAt = end + E.pulseGap; return;
-  }
-  startEmpty();
+  // v0.19: no timed empties. The only trigger is the player touching the EMPTY pickup (see tryPickup, called after the player moves).
 }
 
 // ---------- scatter (gentle pulse slide for dust clumps + web clusters) ----------
@@ -510,6 +533,7 @@ function okAt(o, x, y, rz) {
   const S = T.scatter, d = hyp(x - CX, y - CY), c = dcr(o);
   if (!inArena(x, y, c + 2) || d < rz + c) return false;
   if (o.dirt && hyp(x - CX, y - spawnY()) < S.spawnKeep + o.r) return false;
+  if (o.dirt && pickBlocked(x, y, o.r)) return false; // v0.19: never slide dust onto the EMPTY pickup
   return true;
 }
 function webClusters() { // connected groups of webs (centres within webLinkR), via union-find
@@ -898,7 +922,7 @@ function die(reason) {
   G.phase = 'dead'; G.cause = reason; G.deathT = 0;
   G.newBest = G.t > best; if (G.newBest) { best = G.t; saveBest(best); }
   G.score = calcScore(); G.newBestScore = G.score > bestScore; if (G.newBestScore) bestScore = G.score;
-  G.record = { version: VERSION, time: +G.t.toFixed(1), pulses: G.pulseN, luredKills: G.lureKills, websBroken: websBroken(), websByPlayer: G.websPlayer, websByBugs: G.websBugs, bugsKilled: G.bugsKilled, lostToFilter: G.sucked, empties: G.empties, emptiedBugs: G.emptiedBugs, score: G.score, cause: reason, ts: Date.now() };
+  G.record = { version: VERSION, time: +G.t.toFixed(1), pulses: G.pulseN, luredKills: G.lureKills, websBroken: websBroken(), websByPlayer: G.websPlayer, websByBugs: G.websBugs, bugsKilled: G.bugsKilled, lostToFilter: G.sucked, empties: G.empties, emptyUsed: G.emptyUsed, emptiedBugs: G.emptiedBugs, score: G.score, cause: reason, ts: Date.now() };
   saveRun(G.record);
   G.shake = 14; burst(G.player.x, G.player.y, '#fff4d6', 30, 220, 1);
   beep(120, 0.6, 'sawtooth', 0.1);
@@ -936,6 +960,7 @@ function step(dt) {
   G.filterR += (fr - G.filterR) * Math.min(1, 3 * dt);
 
   updatePlayer(dt);
+  tryPickup(dt);
   trickleSpawn(dt);
   for (const b of G.bugs) updateBug(b, dt);
   bugInteractions();
@@ -947,6 +972,7 @@ function step(dt) {
 
   // dust + webs: the pulse gently slides them (see scatterBlast / updateDebris); they are never pulled in, eaten or evicted
   updateDebris(dt);
+  clearPickup(dt);
   // re-resolve collisions after clumps moved
   keepIn(p); for (const b of G.bugs) if (b.spawn <= 0) keepIn(b);
 
@@ -1252,6 +1278,38 @@ function drawEmptyOver(t) {
     const hx = ax + ux * L, hy = ay + uy * L; ctx.fillStyle = '#7dff9a'; ctx.beginPath(); ctx.moveTo(hx + ux * 9, hy + uy * 9); ctx.lineTo(hx - uy * 7, hy + ux * 7); ctx.lineTo(hx + uy * 7, hy - ux * 7); ctx.closePath(); ctx.fill();
   }
 }
+// v0.19 EMPTY icon: a little canister (lid + body + down arrow) on a round badge. state: 'ready' (bright green), 'wait' (dim), 'used' (grey + slash)
+function drawEmptyIcon(x, y, r, state, glow) {
+  const on = state === 'ready', used = state === 'used';
+  const fill = used ? 'rgba(90,98,118,0.55)' : on ? '#2fd46a' : 'rgba(47,140,80,0.55)', rim = used ? '#7a849c' : on ? '#b8ffcb' : 'rgba(150,220,170,0.6)';
+  if (glow && on) { ctx.save(); ctx.shadowColor = '#7dff9a'; ctx.shadowBlur = 16; }
+  ctx.fillStyle = fill; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+  if (glow && on) ctx.restore();
+  ctx.strokeStyle = rim; ctx.lineWidth = Math.max(1.5, r * 0.14); ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.stroke();
+  const g = used ? '#c3cad8' : on ? '#06240f' : 'rgba(10,40,20,0.8)', s = r / 15;
+  ctx.fillStyle = g; ctx.strokeStyle = g; ctx.lineWidth = 1.6 * s;
+  ctx.fillRect(x - 7 * s, y - 8 * s, 14 * s, 2.4 * s); ctx.fillRect(x - 2.5 * s, y - 10 * s, 5 * s, 2 * s);              // lid + handle
+  ctx.beginPath(); ctx.moveTo(x - 6 * s, y - 4.5 * s); ctx.lineTo(x + 6 * s, y - 4.5 * s); ctx.lineTo(x + 4.6 * s, y + 9 * s); ctx.lineTo(x - 4.6 * s, y + 9 * s); ctx.closePath(); ctx.stroke(); // body
+  ctx.beginPath(); ctx.moveTo(x, y - 2 * s); ctx.lineTo(x, y + 5 * s); ctx.stroke();                                   // down arrow
+  ctx.beginPath(); ctx.moveTo(x - 2.6 * s, y + 2.6 * s); ctx.lineTo(x, y + 5.4 * s); ctx.lineTo(x + 2.6 * s, y + 2.6 * s); ctx.stroke();
+  if (used) { ctx.strokeStyle = '#ff7a6a'; ctx.lineWidth = Math.max(1.5, r * 0.16); ctx.beginPath(); ctx.moveTo(x - r * 0.7, y + r * 0.7); ctx.lineTo(x + r * 0.7, y - r * 0.7); ctx.stroke(); }
+}
+function drawPickup(t) { // the EMPTY pickup in its corner (gone once used)
+  if (G.emptyCharges <= 0 || !G.pick) return;
+  const [x, y] = pickPos(), st = emptyState(), on = st === 'ready', R = T.empty.pickR, bob = on ? Math.sin(t * 3) * 1.5 : 0;
+  if (on) { const k = (t * 0.9) % 1; ctx.strokeStyle = `rgba(125,255,154,${0.7 * (1 - k)})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, R + 4 + k * 16, 0, TAU); ctx.stroke(); }
+  drawEmptyIcon(x, y + bob, R, st, true);
+  ctx.textAlign = 'center'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(4,10,6,0.85)';
+  const below = y < CY, ly = below ? y + R + 15 : y - R - 8;
+  ctx.font = 'bold 11px system-ui,sans-serif'; ctx.fillStyle = on ? '#7dff9a' : '#9aa6bf';
+  const lab = on ? 'EMPTY' : 'EMPTY (after pulse)';
+  ctx.strokeText(lab, x + (x < CX ? 14 : -14), ly); ctx.fillText(lab, x + (x < CX ? 14 : -14), ly);
+  if (G.phase === 'play' && G.t < T.empty.hintT && on) { // first seconds of a run: say what it does
+    const a = clamp((T.empty.hintT - G.t) / 1.5, 0, 1), hy = below ? ly + 14 : ly - 14, hx = x + (x < CX ? 40 : -40);
+    ctx.globalAlpha = a; ctx.font = '11px system-ui,sans-serif'; ctx.fillStyle = '#d8ffe2';
+    ctx.strokeText('touch to empty the canister (1 use)', hx, hy); ctx.fillText('touch to empty the canister (1 use)', hx, hy); ctx.globalAlpha = 1;
+  }
+}
 function drawStuckLabel() {
   if (G.phase === 'play' && G.player.webbed) { ctx.textAlign = 'center'; ctx.font = 'bold 12px system-ui,sans-serif'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(4,6,12,0.85)'; ctx.fillStyle = 'rgba(235,220,255,0.95)'; const sl = ('STUCK -' + Math.round((G.player.webSlowNow || 0.5) * 100) + '%' + (G.player.webStr > 1 ? '  (layer ' + G.player.webStr + ')' : '')); ctx.strokeText(sl, G.player.x, G.player.y + 38); ctx.fillText(sl, G.player.x, G.player.y + 38); } // below the player, clear of its halo and locator arrow
 }
@@ -1261,7 +1319,15 @@ function drawHUD(t) { // screen space, CSS pixels: a slim strip above the arena 
   ctx.textAlign = 'left'; ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 22px system-ui,sans-serif';
   ctx.fillText(G.t.toFixed(1) + 's', L, top + 25);
   const stats = 'Pulses: ' + G.pulseN + (G.empties ? '   Empties: ' + G.empties : '') + '   Lured kills: ' + G.lureKills + '   Webs broken: ' + websBroken() + '   Bugs: ' + G.bugs.length + '   Dust: ' + G.clumps.length;
-  let fs = 12; ctx.font = fs + 'px system-ui,sans-serif'; while (fs > 8 && tw(stats) > Rr - L) { fs--; ctx.font = fs + 'px system-ui,sans-serif'; }
+  // v0.19 EMPTY chip (right end of row 2): icon + READY x1 / WAIT / USED
+  const est = emptyState(), etxt = est === 'ready' ? 'EMPTY x' + G.emptyCharges : est === 'wait' ? 'EMPTY wait' : 'EMPTY used';
+  ctx.font = 'bold 12px system-ui,sans-serif'; const ew = tw(etxt) + 22;
+  if (G.phase !== 'ready') {
+    drawEmptyIcon(Rr - ew + 7, top + 40, 8, est, false);
+    ctx.textAlign = 'right'; ctx.fillStyle = est === 'ready' ? '#7dff9a' : est === 'wait' ? '#9fc8ab' : '#7f8aa3'; ctx.fillText(etxt, Rr, top + 44); ctx.textAlign = 'left';
+  }
+  const sw = Rr - L - ew - 10;
+  let fs = 12; ctx.font = fs + 'px system-ui,sans-serif'; while (fs > 8 && tw(stats) > sw) { fs--; ctx.font = fs + 'px system-ui,sans-serif'; }
   ctx.fillStyle = '#8fa0c8'; ctx.fillText(stats, L, top + 44);
   ctx.textAlign = 'right'; ctx.fillStyle = '#ffd23c'; ctx.font = 'bold 14px system-ui,sans-serif';
   ctx.fillText('BEST ' + best.toFixed(1) + 's', Rr, top + 22);
@@ -1271,7 +1337,9 @@ function drawHUD(t) { // screen space, CSS pixels: a slim strip above the arena 
   if (G.empty) { // canister empty telegraph: overrides the pulse banner
     const left = Math.max(0, T.empty.warn - G.empty.t), on = Math.sin(t * 16) > 0;
     ctx.fillStyle = on ? '#7dff9a' : '#ffffff'; ctx.font = 'bold 18px system-ui,sans-serif';
-    ctx.fillText('CANISTER EMPTYING ' + left.toFixed(1) + ' - GET TO THE GREEN!', mid, top + 22);
+    let bt = 'CANISTER EMPTYING ' + left.toFixed(1) + ' - GET TO THE GREEN!';
+    if (tw(bt) > cssW - 190) { bt = 'EMPTYING ' + left.toFixed(1) + ' - GET TO GREEN!'; ctx.font = 'bold 13px system-ui,sans-serif'; } // narrow phones: keep clear of the timer / BEST
+    ctx.fillText(bt, mid, top + 22);
     ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(mid - 80, top + 30, 160, 5);
     ctx.fillStyle = '#7dff9a'; ctx.fillRect(mid - 80, top + 30, 160 * clamp(left / T.empty.warn, 0, 1), 5);
   } else if (G.emptyFx || G.refill.length) {
@@ -1324,14 +1392,13 @@ function drawLegend(y0) {
   ctx.fillStyle = zg; ctx.beginPath(); ctx.arc(CX - 250, y - 5, 11, 0, TAU); ctx.fill();
   ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 14px system-ui,sans-serif'; ctx.fillText('Filter', CX - 232, y);
   ctx.fillStyle = '#9fb0d8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText('the dark core kills anything. A PULSE swells it and drags everyone in:', CX - 150, y);
-  ctx.fillText('bugs flee, but lure one close to the filter and the suction wins.', CX - 150, y + 20);
-  // canister empty note (v0.18)
+  ctx.fillText('bugs try to flee, but anything close or mid-range spirals into the core.', CX - 150, y + 20);
+  // EMPTY pickup note (v0.19)
   const y2 = y + 42;
-  ctx.fillStyle = 'rgba(125,255,154,0.85)'; ctx.beginPath(); ctx.arc(CX - 250, y2 - 5, 8, 0, TAU); ctx.fill();
-  ctx.strokeStyle = '#7dff9a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(CX - 250, y2 - 5, 11, 0, TAU); ctx.stroke();
-  ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 14px system-ui,sans-serif'; ctx.fillText('Empty', CX - 232, y2);
-  ctx.fillStyle = '#9fb0d8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText('Rarely the canister is EMPTIED: reach the flashing GREEN spot or be', CX - 150, y2);
-  ctx.fillText('wiped out with everything else (+150). Then a big refill drops in.', CX - 150, y2 + 20);
+  drawEmptyIcon(CX - 250, y2 - 5, 10, 'ready', false);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#e6ecff'; ctx.font = 'bold 14px system-ui,sans-serif'; ctx.fillText('Empty', CX - 232, y2);
+  ctx.fillStyle = '#9fb0d8'; ctx.font = '14px system-ui,sans-serif'; ctx.fillText('1 per run, in a corner: touch it to EMPTY the canister. Reach the GREEN', CX - 150, y2);
+  ctx.fillText('spot on the far side or be wiped with everything else (+150). Then a refill.', CX - 150, y2 + 20);
 }
 
 function render(t) {
@@ -1353,6 +1420,7 @@ function render(t) {
   { const pp = G.player; // particles: dimmed right around the player so it never drowns in confetti
     for (const q of G.parts) { ctx.globalAlpha = clamp(q.life / q.max, 0, 1) * (hyp(q.x - pp.x, q.y - pp.y) < 30 ? 0.3 : 1); ctx.fillStyle = q.color; ctx.fillRect(q.x, q.y, q.size, q.size); } }
   ctx.globalAlpha = 1;
+  drawPickup(t);
   drawEmptyOver(t);
   if (G.phase !== 'dead' || G.deathT < 0.05) drawPlayer(t); // the player (and its halo, dash trail, ping) is drawn on top of everything
   ctx.restore();
@@ -1373,7 +1441,7 @@ function render(t) {
         { t: 'PROJECT VACUUM', f: 'bold 52px system-ui,sans-serif', h: 42, c: '#ff6a50' },
         { t: 'You are a bug inside a vacuum canister. You cannot fight. Survive.', f: '17px system-ui,sans-serif', h: 24 },
         { t: 'A VACUUM PULSE swells the filter and drags everyone in: lure a bug close to the core and the suction beats its flee.', f: '14px system-ui,sans-serif', h: 20, c: '#9fb0d8' },
-        { t: 'Rarely the canister is EMPTIED: race to the flashing GREEN spot or be wiped. Then a heavy refill drops in.', f: '14px system-ui,sans-serif', h: 20, c: '#9fb0d8' },
+        { t: 'One EMPTY pickup sits in a corner: touch it to empty the canister, then race to the GREEN spot on the far side or be wiped too.', f: '14px system-ui,sans-serif', h: 20, c: '#9fb0d8' },
         { t: 'Lure bugs into each other: stingers and Beetle charges hit whatever is in the way.', f: '14px system-ui,sans-serif', h: 18, c: '#9fb0d8' },
       ] });
       drawLegend(288);
@@ -1513,67 +1581,72 @@ function setupTouch() {
 
 // ---------- in-game changelog (condensed from CHANGELOG.md; newest first). '## ' = version heading, '- ' = bullet ----------
 const CHANGELOG = [
-  '## v0.18.3 - 2026-10-04 (~23:45 PT)',
+  '## v0.19.0 - 2026-10-04',
+  '- No more free timed empties: the canister only empties when YOU trigger it.',
+  '- EMPTY pickup: one per run, sitting in a random corner from the start (green canister icon). Touch it to trigger the empty (uses it up). It is locked during a pulse or its warning. The HUD shows EMPTY x1 / wait / used.',
+  '- On trigger: 5.2 s telegraph, the GREEN safe spot appears as far as practical on the opposite side from you, then the wipe. Any overlap with the spot = safe. Heavy refill afterwards (same as before); difficulty does not reset.',
+  '- Suction fix: stronger pull, weaker flee. During a pulse, bugs at close and mid range now slowly lose toward the filter and spiral in (the closer, the faster); only far-out bugs still escape. Roach chase AI and bonded Moths unchanged.',
+  '## v0.18.3 - 2026-10-04',
   '- Title screen: High Scores button opens a clean Top 10 (fetched when the title shows). Offline / failed fetch hides it or shows offline.',
   '- Game over: when the shared board is on, a clean High Scores panel replaces the old game-over screen (name + submit + play again). No more CRT / arcade side card.',
   '- Empty safe zone: you (and bonded moths with you) are safe if ANY part of your circle overlaps the green spot (distance < safeR + player.r), not center-only.',
   '- Empty telegraph is 5.2 s (was 4.2 s). Empty timing gaps unchanged (first 55-70 s, then 50-70 s, delay if pulse).',
-  '## v0.18.2 - 2026-10-04 (~23:40 PT)',
+  '## v0.18.2 - 2026-10-04',
   '- Shared HIGH SCORES now rank by survival time (longest first), shown as 1st  Ben  01:42.3. Score is still sent and kept, just not used for ranking.',
-  '## v0.18.1 - 2026-10-04 (~23:20 PT)',
+  '## v0.18.1 - 2026-10-04',
   '- Shared Top 10 is now ON: the game-over High Scores panel talks to the live leaderboard Worker. No gameplay changes.',
-  '## v0.18.0 - 2026-10-04 (~23:30 PT)',
+  '## v0.18.0 - 2026-10-04',
   '- Stronger filter pulse (risk / reward): bugs are dragged ~2.3x harder toward the filter (and much harder close to the core). During a pulse EVERY bug (Roach too) flees radially away from the filter; far out they mostly escape, but if you lure one near the core the suction wins and it dies. Bonded Moths stay with you. Roach chase AI itself is unchanged.',
   '- Canister EMPTY: a rare, telegraphed all-clear wipe (first ~55-70 s, then every ~50-70 s; never during a pulse). Rumble, EMPTYING..., one flashing GREEN safe spot on the far side of the arena. Everything outside the spot is wiped; you die if you miss it. Surviving = +150. Then a HEAVY refill of high-level bugs drops in (late-game difficulty stays high, not a quiet reset).',
   '- Shared Top 10 on game over (once the free Cloudflare Worker in leaderboard/ is switched on). Off by default; offline mode unchanged.',
-  '## v0.17.0 - 2026-10-04 (~21:50 PT)',
+  '## v0.17.0 - 2026-10-04',
   '- You stand out: the player is a white bug with a saturated cyan rim and glow (nothing else uses it), on a dark contrast plate with an always-on halo ring, and it is drawn on top of everything. Particles fade right around you, and a small cyan arrow points at you when you are crowded.',
   '- Dashing leaves a bright trail from where you started to where you landed, then a white flash and an expanding ring at the landing spot.',
   '- New palette: Roach, Wasp, Spider, Beetle and unrecruited Moths are light, bright pastels (peach, lemon, lilac, mint, sky) with crisp outlines, still easy to see and tell apart. You and recruited Moths are the saturated, glowing ones. Telegraphs (aim lines, red eyes, orange charge) stay bold.',
   '- Webs go in one pass: walking through a web, or a bug breaking free of it, removes the whole web, whatever its layers (layers still slow you more and hold bugs longer). Only the webs actually crossed go. Each web counts once in Webs broken. Spiders are still immune and still stack layers. No other gameplay changes.',
-  '## v0.16.0 - 2026-10-03 (~20:50 PT)',
+  '## v0.16.0 - 2026-10-03',
   '- Share button on the start and game-over screens (bottom right): opens the share sheet on iPhone / app mode, otherwise copies the game link and shows "Link copied!", or shows the link in a box you can copy by hand. It always shares https://silvertibby.github.io/project-vacuum/. Cancelling the share sheet does nothing. No gameplay changes.',
-  '## v0.15.0 - 2026-10-03 (~20:30 PT)',
+  '## v0.15.0 - 2026-10-03',
   '- More frequent pulses, same weak pull and the same 3.5 s warning: the first pulse is at ~20 s (was 28 s) and gaps grow 20, 22, 24 ... s up to a 40 s cap (was 32 s growing to 70 s). Pulse strength (core size, pull, length) still ramps up, but at half the rate per pulse, so it matches the old strength at the same point in the run.',
   '- Waves at each pulse are slightly smaller (5 + 1.5 per pulse, up to 16 bugs) because pulses come about twice as often; the pulse score bonus is now 60 per pulse (was 100).',
-  '## v0.14.0 - 2026-10-02 (~14:45 PT)',
+  '## v0.14.0 - 2026-10-02',
   '- Early bugs are fragile, later bugs are tough: bug hp is 45% of the old value at the start, 100% at 90 s, then keeps climbing (cap 2.2x, ~3.5 min). Stingers, charges and lunges between bugs scale up more slowly (hp ramp ^0.85), so friendly fire kills early bugs easily and late ones need real teamwork. What hurts YOU is unchanged; Roach chase is unchanged.',
   '- Dust can now go away: clumps wear down when bugs, you (a dash hits hard), stingers or charges hit them (cracks, shrinking), then pop in a small burst. A clump touching the filter core is destroyed, and a pulse can drag a clump that is right next to the filter into it. New dust trickles in faster when fewer than 8 remain (cap 16). Webs are untouched.',
   '- The round canister is now a big rounded RECTANGLE that fills the screen on desktop, phone portrait and landscape (about the same play area everywhere, shaped to your screen, inside the safe areas). Walls work like the old rim; the filter sits in the centre. A slim HUD strip sits above the arena.',
-  '## v0.13.0 - 2026-10-01 (~19:00 PT)',
+  '## v0.13.0 - 2026-10-01',
   '- App mode for iPhone: Share > Add to Home Screen from the Pages URL gives a bug-themed icon, the name "Vacuum", and launches full screen with no Safari bar (black-translucent status bar, safe areas respected). The icon and web manifest are embedded in the single HTML file.',
   '- Standalone hardening: no pull-to-refresh or bounce, no text selection or long-press callouts, no double-tap or pinch zoom. No gameplay changes.',
-  '## v0.12.0 - 2026-10-01 (~16:00 PT)',
+  '## v0.12.0 - 2026-10-01',
   '- Pulse scatter is now gentle and readable: dust and webs slide 60-150 px over ~1.5-2 s with easing, no bouncing, no streak lines (only a soft fade), much less shake and clutter during pulses.',
   '- Linked webs stay linked: connected webs (a Spider trail or cluster) slide as one rigid unit, so shapes and chains survive a pulse. Link strands are drawn between adjacent webs.',
   '- Webs never vanish on their own: no eviction, no timers, no consumption by the pulse or the core. They are removed only when their layers are cleared by a pass from you or a non-Spider bug. The cap is now 200; at the cap Spiders stop laying new webs.',
   '- In-game changelog panel (this one): click or tap the version label on the start or game-over screen. Scroll with wheel, touch drag, arrows or W/S; close with Close, Esc, C or by tapping outside.',
-  '## v0.11.0 - 2026-10-01 (~15:30 PT)',
+  '## v0.11.0 - 2026-10-01',
   '- Pulse scatters dust and webs instead of sucking them in; counts and web layers are kept.',
   '- Versioning: version label on start and game-over screens, version saved in each run record, CHANGELOG.md.',
-  '## v0.10.0 - 2026-10-01 (~15:00 PT)',
+  '## v0.10.0 - 2026-10-01',
   '- Stacking webs: a Spider laying on a web adds a layer (max 4); each pass removes one layer; more layers slow more and hold bugs longer.',
   '- Webs broken stat (you vs bugs) on the HUD and game over, provisional combined Score, best score stored separately, run records (last 25).',
-  '## v0.9.1 - 2026-10-01 (~14:30 PT)',
+  '## v0.9.1 - 2026-10-01',
   '- Moths are a shield on you only: an invulnerable escort that is spent only when a lethal hit reaches you.',
-  '## v0.9.0 - 2026-10-01 (~14:00 PT)',
+  '## v0.9.0 - 2026-10-01',
   '- Persistent webs: no timer; caught bugs are stuck ~1 s; webs tear when crossed.',
   '- Keyboard hardening: focus handling, pause on blur with a clear overlay, e.key fallback, "keys: ok".',
-  '## v0.8.0 - 2026-10-01 (~13:15 PT)',
+  '## v0.8.0 - 2026-10-01',
   '- iPhone touch controls: floating joystick, DASH and pause buttons, responsive scaling, safe areas, audio unlock.',
-  '## v0.7.0 - 2026-10-01 (~12:30 PT)',
+  '## v0.7.0 - 2026-10-01',
   '- Attacks overhaul: per-type aggro radius, friendly fire, Wasp stingers, Spider webs (slow 50%), Beetle charge only, even spawn mix, HP rebalance. Roach chase unchanged.',
-  '## v0.6.0 - 2026-10-01 (~12:00 PT)',
+  '## v0.6.0 - 2026-10-01',
   '- Moths idle until touched (recruit by touch), with a beacon glow.',
-  '## v0.5.0 - 2026-10-01 (~11:30 PT)',
+  '## v0.5.0 - 2026-10-01',
   '- Suction became a danger zone: weak bug nudge, lethal filter core with an orange hazard zone, 4 s spawn protection, easier opening. Suction resistance removed.',
-  '## v0.4.0 - 2026-10-01 (~11:00 PT)',
+  '## v0.4.0 - 2026-10-01',
   '- More bugs and debris; much rarer pulses (first at 28 s, gaps 32 s growing to 70 s); bug cap 45, clump cap 16; time-based escalation.',
-  '## v0.3.0 - 2026-10-01 (~10:30 PT)',
+  '## v0.3.0 - 2026-10-01',
   '- Pulse gaps grow over the run; trickle spawns; bigger waves.',
-  '## v0.2.0 - 2026-10-01 (~10:15 PT)',
+  '## v0.2.0 - 2026-10-01',
   '- Suction resistance (armor rings) for later-spawned bugs.',
-  '## v0.1.0 - 2026-10-01 (~10:00 PT)',
+  '## v0.1.0 - 2026-10-01',
   '- Initial prototype: Roach, Wasp, Spider, Beetle and Moth in a circular canister with a filter; storm-circle pulses with a telegraph; dash; survival time and best time in localStorage. Design: evasion only, lure bugs into each other.',
   '## Design decisions from playtests',
   '- Keep Roaches chasing. Pulses should be rare. Suction should be a danger zone, not a vacuum.',
@@ -1996,7 +2069,7 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // test hook (used by headless checks)
-window.__vac = { VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, lb, lbPlace, lbSubmit, lbToggleTitle, inSafe, setLeaderboardURL(u) { lb.url = String(u || '').replace(/\/+$/, ''); }, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb, pullEnv, pullVec, bugSuck, avoidVec, startEmpty, doEmpty, pickSafeSpot, updateEmpty, startPulse, planRefill, makeBug, killBug };
+window.__vac = { VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, lb, lbPlace, lbSubmit, lbToggleTitle, inSafe, setLeaderboardURL(u) { lb.url = String(u || '').replace(/\/+$/, ''); }, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb, pullEnv, pullVec, bugSuck, avoidVec, startEmpty, doEmpty, pickSafeSpot, updateEmpty, pickPos, emptyLocked, emptyState, tryPickup, startPulse, planRefill, makeBug, killBug };
 })();
 
 </script>
