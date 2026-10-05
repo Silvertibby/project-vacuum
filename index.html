@@ -34,7 +34,7 @@
 <script>// Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
 (() => {
 'use strict';
-const VERSION = '0.16.0'; // keep in sync with CHANGELOG.md
+const VERSION = '0.17.0'; // keep in sync with CHANGELOG.md
 const W = 900, H = 700, CX = W / 2, CY = H / 2;   // CX,CY = centre of the arena AND the filter (the arena itself is a rounded RECTANGLE sized to the screen, see setArena)
 let AW = 760, AH = 540, AX0 = CX - 380, AX1 = CX + 380, AY0 = CY - 270, AY1 = CY + 270; // arena rect in world units (updated by computeLayout)
 const CORNER = 40;                                // rounded-corner radius of the canister
@@ -80,11 +80,11 @@ const T = {
   spider: { aggro: 230, leash: 320, speed: 46, biteRange: 85 },
   beetle: { aggro: 150, leash: 240 },
   // Webs (laid by Spiders) never expire and are NEVER evicted (at the cap Spiders just stop laying new ones): they wait until something non-Spider crosses them. Not lethal.
-  //  player: 50% slow on a layer-1 web (up to 65% at max layers; dash 80% -> 70%); each pass removes one layer.
-  //  bugs (incl. Roaches): caught = stuck for ~webStuck s (longer per layer) at webStuckSlow speed, then one layer is removed. Spiders are immune.
+  //  player: 50% slow on a layer-1 web (up to 65% at max layers; dash 80% -> 70%); one completed pass removes the whole web (v0.17).
+  //  bugs (incl. Roaches): caught = stuck for ~webStuck s (longer per layer) at webStuckSlow speed, then the whole web is removed (v0.17). Spiders are immune.
   webR: 17, webSlow: 0.5, webSlowMax: 0.35, /* speed multipliers: 0.5 = 50% slow on layer 1, 0.35 = 65% slow at max layers */ webDashSlow: 0.8, webDashSlowMax: 0.7, maxWebs: 200, webLinkR: 22, webStuck: 1.0, webStuckSlow: 0.15, webPlayerMax: 1.0, webImmune: 0.6,
   // Stacking: a Spider laying a web within webStackR of an existing web adds a LAYER (strength, cap webMaxStr). Each pass by the player or a bug
-  // (leaving / webPlayerMax s standing / bug freed) removes ONE layer; the web only tears at 0. Bugs stay stuck webStuckPerLayer longer per extra layer.
+  // (leaving / webPlayerMax s standing / bug freed) removes the WHOLE web (v0.17; layers no longer peel one by one). Bugs stay stuck webStuckPerLayer longer per extra layer.
   webStackR: 11, webMaxStr: 4, webStuckPerLayer: 0.3,
   // Score (provisional): time*10 + lured kills*50 + webs broken by you*5 + webs broken by bugs*2 + pulses*60 (was 100; pulses now come ~2x as often)
   score: { time: 10, lure: 50, webPlayer: 5, webBug: 2, pulse: 60 },
@@ -93,11 +93,13 @@ const T = {
 };
 
 const TYPES = {
-  roach:  { name: 'Roach',  color: '#ff5a3c', r: 9,  hp: 1, mass: 1.0,  desc: 'HUNTER: always chases you. Lure it into other bugs!' },
-  wasp:   { name: 'Wasp',   color: '#ffd23c', r: 8,  hp: 5, mass: 0.9,  desc: 'SHOOTER: keeps away, fires stinger bursts (they hit bugs too)' },
-  spider: { name: 'Spider', color: '#b36bff', r: 11, hp: 7, mass: 0.8,  desc: 'WEAVER: slow; webs slow you & bugs; re-laid webs stack (x4)' },
-  beetle: { name: 'Beetle', color: '#4fd36a', r: 14, hp: 4, mass: 0.6,  desc: 'CHARGER: telegraphs, then rams in a line through anything' },
-  moth:   { name: 'Moth',   color: '#5ee6ff', r: 7,  hp: 1, mass: 1.25, desc: 'ALLY: touch to recruit; it shields YOU (absorbs one hit on you)' },
+  // v0.17 palette: other bugs are light, bright PASTELS with a darker same-hue outline (easy to see, but soft), so the player
+  // (white body, saturated cyan rim + glow) and recruited Moths (saturated cyan) are the only saturated, glowing things in the arena.
+  roach:  { name: 'Roach',  color: '#ffb59e', outline: '#8a2e1a', r: 9,  hp: 1, mass: 1.0,  desc: 'HUNTER: always chases you. Lure it into other bugs!' },
+  wasp:   { name: 'Wasp',   color: '#fff0a0', outline: '#7a6414', r: 8,  hp: 5, mass: 0.9,  desc: 'SHOOTER: keeps away, fires stinger bursts (they hit bugs too)' },
+  spider: { name: 'Spider', color: '#dcc2ff', outline: '#5a2e8f', r: 11, hp: 7, mass: 0.8,  desc: 'WEAVER: slow; webs slow you & bugs; re-laid webs stack (x4)' },
+  beetle: { name: 'Beetle', color: '#b4f2c6', outline: '#1f6b3a', r: 14, hp: 4, mass: 0.6,  desc: 'CHARGER: telegraphs, then rams in a line through anything' },
+  moth:   { name: 'Moth',   color: '#c6ecf7', outline: '#2a6f80', bright: '#19e6ff', r: 7,  hp: 1, mass: 1.25, desc: 'ALLY: touch to recruit; it shields YOU (absorbs one hit on you)' },
 };
 
 // ---------- helpers ----------
@@ -593,15 +595,16 @@ function addWeb(x, y) {
   G.webs.push({ x, y, r: T.webR * rnd(0.9, 1.2), seed: rnd(100), dead: false, strength: 1, pulse: 0, mv: false });
 }
 function websAt(x, y) { const out = []; for (const w of G.webs) if (!w.dead && hyp(x - w.x, y - w.y) < w.r) out.push(w); return out; }
-// One pass removes ONE layer from each web in the list; a web only tears at 0. Every layer cleared counts as a web broken (who = 'player' | 'bug').
+// v0.17: ONE completed pass removes each web in the list ENTIRELY (all layers). Layers still made the pass slower / the bug stuck longer while it lasted.
+// Each web removed counts as ONE web broken (who = 'player' | 'bug'). Only the webs actually passed through go; the rest of a linked cluster stays
+// (links are recomputed from the surviving webs every frame / pulse).
 function weakenWebs(list, who) {
   if (!list) return;
   for (const w of list) {
     if (w.dead) continue;
-    w.strength = str(w) - 1;
+    const layers = str(w); w.strength = 0; w.dead = true;
     if (who === 'player') G.websPlayer++; else G.websBugs++;
-    if (w.strength <= 0) { w.dead = true; burst(w.x, w.y, '#eadfff', 6, 85, 0.45); G.rings.push({ x: w.x, y: w.y, r: w.r, life: 0.4 }); }
-    else { w.pulse = 0.3; burst(w.x, w.y, '#eadfff', 3, 55, 0.3); G.rings.push({ x: w.x, y: w.y, r: w.r * 0.7, life: 0.3 }); }
+    burst(w.x, w.y, '#eadfff', 5 + 2 * layers, 85, 0.45); G.rings.push({ x: w.x, y: w.y, r: w.r, life: 0.4 });
   }
 }
 function websBroken() { return G.websPlayer + G.websBugs; }
@@ -738,6 +741,7 @@ function updatePlayer(dt) {
   if ((keys.Space || touch.dashHeld || touch.dashBuf > 0) && p.dashCd <= 0 && p.dashT <= 0) {
     p.dashT = T.dashTime; p.dashCd = T.dashCd; p.ifr = T.dashTime + 0.06; beep(520, 0.08, 'triangle', 0.04);
     burst(p.x, p.y, '#fff4d6', 6, 60, 0.3);
+    p.dfx = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, on: true, life: 0.5 }; // visual only: dash trail start -> end, then a locator ping where you land
   }
   let tvx, tvy;
   if (p.dashT > 0) { p.dashT -= dt; tvx = p.dx * T.dashSpeed; tvy = p.dy * T.dashSpeed; p.vx = tvx; p.vy = tvy; }
@@ -745,7 +749,7 @@ function updatePlayer(dt) {
   const [px, py] = pullVec(p.x, p.y, T.playerPull(G.pulseN), true);
   const under = websAt(p.x, p.y);
   p.webbed = under.length > 0; p.webStr = p.webbed ? maxStr(under) : 0;
-  if (p.webbed) { // stuck on the web(s): slowed while on them; each pass (leave, or webPlayerMax s standing) removes one layer
+  if (p.webbed) { // stuck on the web(s): slowed while on them; each pass (leave, or webPlayerMax s standing) removes the whole web
     p.webTime = (p.webTime || 0) + dt; p.webTouched = p.webTouched || [];
     for (const w of under) if (!p.webTouched.includes(w)) p.webTouched.push(w);
     if (p.webTime >= T.webPlayerMax) { weakenWebs(p.webTouched, 'player'); p.webTouched = []; p.webTime = 0; }
@@ -757,6 +761,11 @@ function updatePlayer(dt) {
   p.x += (p.vx * wf + px) * dt; p.y += (p.vy * wf + py) * dt;
   keepIn(p);
   p.trail.push([p.x, p.y, p.dashT > 0 ? 1 : 0]); if (p.trail.length > 8) p.trail.shift();
+  if (p.dfx) { // visual only (no gameplay effect)
+    if (p.dfx.on) { p.dfx.x1 = p.x; p.dfx.y1 = p.y; if (p.dashT <= 0) { p.dfx.on = false; p.dfx.life = 0.5; p.ping = { x: p.x, y: p.y, life: 0.6 }; } }
+    else { p.dfx.life -= dt; if (p.dfx.life <= 0) p.dfx = null; }
+  }
+  if (p.ping) { p.ping.life -= dt; if (p.ping.life <= 0) p.ping = null; }
 }
 
 function die(reason) {
@@ -940,15 +949,16 @@ function drawBug(b, t) {
   ctx.rotate(b.ang);
   const fl = b.flash > 0;
   const body = fl ? '#fff' : col;
+  const ol = () => { ctx.strokeStyle = d.outline || 'rgba(0,0,0,0.6)'; ctx.lineWidth = 1.6; ctx.stroke(); }; // crisp darker outline on the body path just filled
   const legs = (n, len, spread, w) => { ctx.strokeStyle = '#000'; ctx.lineWidth = w; for (let i = 0; i < n; i++) { const a = (i / n) * TAU + 0.3; const wig = Math.sin(t * 25 + i * 2) * 0.12; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a + wig) * len, Math.sin(a + wig) * len); ctx.stroke(); } };
   switch (b.type) {
     case 'roach':
       ctx.strokeStyle = body; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(b.r * 0.8, -2); ctx.lineTo(b.r * 1.7, -6 + Math.sin(t * 12) * 2); ctx.moveTo(b.r * 0.8, 2); ctx.lineTo(b.r * 1.7, 6 - Math.sin(t * 12) * 2); ctx.stroke();
-      ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.2, b.r * 0.8, 0, 0, TAU); ctx.fill();
-      ctx.strokeStyle = '#7a1c0c'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(-b.r, 0); ctx.lineTo(b.r * 0.9, 0); ctx.stroke(); break;
+      ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.2, b.r * 0.8, 0, 0, TAU); ctx.fill(); ol();
+      ctx.strokeStyle = '#a8442c'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(-b.r, 0); ctx.lineTo(b.r * 0.9, 0); ctx.stroke(); break;
     case 'wasp':
       ctx.fillStyle = 'rgba(255,255,255,0.4)'; const wf = Math.sin(t * 60) * 2; ctx.beginPath(); ctx.ellipse(-2, -b.r - wf, 6, 3, 0.4, 0, TAU); ctx.ellipse(-2, b.r + wf, 6, 3, -0.4, 0, TAU); ctx.fill();
-      ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.3, b.r * 0.75, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.3, b.r * 0.75, 0, 0, TAU); ctx.fill(); ol();
       if (!fl) { ctx.fillStyle = '#222'; ctx.fillRect(-4, -b.r * 0.7, 3, b.r * 1.4); ctx.fillRect(2, -b.r * 0.6, 3, b.r * 1.2); }
       ctx.fillStyle = '#c33'; ctx.beginPath(); ctx.moveTo(-b.r * 1.3, 0); ctx.lineTo(-b.r * 1.8, 0); ctx.lineTo(-b.r * 1.3, 2); ctx.fill();
       if (b.state === 'windup') { // telegraph: aim line in the (world) firing direction + charging glow
@@ -961,32 +971,33 @@ function drawBug(b, t) {
       const flare = b.state === 'windup' ? 1.5 : 1;
       legs(8, b.r * 1.7 * flare, 0, 2);
       ctx.strokeStyle = body; ctx.lineWidth = 1.5;
-      ctx.fillStyle = body; ctx.beginPath(); ctx.arc(0, 0, b.r, 0, TAU); ctx.fill();
+      ctx.fillStyle = body; ctx.beginPath(); ctx.arc(0, 0, b.r, 0, TAU); ctx.fill(); ol();
       ctx.fillStyle = b.state === 'windup' ? '#ff3030' : '#200a30'; ctx.beginPath(); ctx.arc(b.r * 0.4, -3, 2, 0, TAU); ctx.arc(b.r * 0.4, 3, 2, 0, TAU); ctx.fill();
       if (b.state === 'windup') { ctx.strokeStyle = 'rgba(255,60,60,0.6)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(b.r, 0); ctx.lineTo(b.r + 70, 0); ctx.stroke(); }
       break; }
     case 'beetle': {
       const ch = b.state === 'charge', wu = b.state === 'windup';
       if (b.state === 'rest') ctx.globalAlpha *= 0.8;
-      ctx.fillStyle = fl ? '#fff' : (ch ? '#ff9a2e' : col); ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.15, b.r, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = fl ? '#fff' : (ch ? '#ff9a2e' : col); ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.15, b.r, 0, 0, TAU); ctx.fill(); ol();
       ctx.strokeStyle = '#1a5a2a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(-b.r, 0); ctx.lineTo(b.r * 0.6, 0); ctx.stroke();
       ctx.beginPath(); ctx.arc(0, 0, b.r * 0.9, Math.PI * 0.6, Math.PI * 1.4); ctx.stroke();
-      ctx.fillStyle = ch || wu ? '#ff6a20' : '#2b8a40'; ctx.beginPath(); ctx.moveTo(b.r * 1.1, -4); ctx.lineTo(b.r * 1.9, 0); ctx.lineTo(b.r * 1.1, 4); ctx.fill();
+      ctx.fillStyle = ch || wu ? '#ff6a20' : '#3f9a58'; ctx.beginPath(); ctx.moveTo(b.r * 1.1, -4); ctx.lineTo(b.r * 1.9, 0); ctx.lineTo(b.r * 1.1, 4); ctx.fill();
       if (wu) { ctx.strokeStyle = 'rgba(255,150,40,0.7)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, b.r + 5 + Math.sin(t * 30) * 2, 0, TAU); ctx.stroke(); }
       if (b.state === 'rest') { ctx.rotate(-b.ang); ctx.fillStyle = '#fff'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('z', 0, -b.r - 4); }
       break; }
     case 'moth': {
       const fa = Math.sin(t * 18 + b.id) * 0.5;
-      const pr = b.bonded ? 20 : 20 + 5 * Math.sin(t * 3 + b.id), pa = b.bonded ? 0.45 : 0.55 + 0.25 * Math.sin(t * 3 + b.id);
-      const g = ctx.createRadialGradient(0, 0, 1, 0, 0, pr); g.addColorStop(0, `rgba(94,230,255,${pa})`); g.addColorStop(1, 'rgba(94,230,255,0)');
+      const pr = b.bonded ? 24 : 18 + 4 * Math.sin(t * 3 + b.id), pa = b.bonded ? 0.8 : 0.3 + 0.15 * Math.sin(t * 3 + b.id); // recruited: saturated, strong glow; unrecruited: soft pastel glow
+      const g = ctx.createRadialGradient(0, 0, 1, 0, 0, pr); g.addColorStop(0, b.bonded ? `rgba(25,230,255,${pa})` : `rgba(198,236,247,${pa})`); g.addColorStop(1, b.bonded ? 'rgba(25,230,255,0)' : 'rgba(198,236,247,0)');
       ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, pr, 0, TAU); ctx.fill();
       if (!b.bonded) { // beacon: slow expanding ring so unrecruited Moths are findable
         const k = (t * 0.6 + b.id * 0.37) % 1;
         ctx.strokeStyle = `rgba(94,230,255,${0.5 * (1 - k)})`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(0, 0, 10 + 24 * k, 0, TAU); ctx.stroke();
       }
-      ctx.fillStyle = fl ? '#fff' : 'rgba(150,240,255,0.85)';
+      ctx.fillStyle = fl ? '#fff' : b.bonded ? d.bright : col;
       ctx.beginPath(); ctx.ellipse(-1, -6, 4, 7 * (1 + fa * 0.3), 0.3, 0, TAU); ctx.ellipse(-1, 6, 4, 7 * (1 - fa * 0.3), -0.3, 0, TAU); ctx.fill();
-      ctx.fillStyle = '#e8fbff'; ctx.beginPath(); ctx.ellipse(1, 0, 4, 2.2, 0, 0, TAU); ctx.fill();
+      ctx.strokeStyle = b.bonded ? '#ffffff' : d.outline; ctx.lineWidth = b.bonded ? 1.2 : 1.4; ctx.stroke();
+      ctx.fillStyle = b.bonded ? '#ffffff' : '#eefaff'; ctx.beginPath(); ctx.ellipse(1, 0, 4, 2.2, 0, 0, TAU); ctx.fill();
       break; }
   }
   // danger outline for always-hostile bugs
@@ -998,22 +1009,55 @@ function drawBug(b, t) {
     ctx.fillStyle = f > 0.5 ? '#7bd88f' : f > 0.25 ? '#ffd23c' : '#ff5a46'; ctx.fillRect(b.x - bw / 2, b.y - b.r - 8, bw * f, 2);
   }
 }
+// v0.17 player visibility: the player is the only thing with a saturated cyan rim + glow; a dark contrast plate and an always-on ground halo sit under it,
+// it is drawn on top of everything, a dash leaves a bright start->end trail and a locator ping at the landing spot, and a small arrow appears when crowded.
+const PLAYER_CYAN = '47,243,255';
+function playerCrowded() {
+  const p = G.player; let n = 0;
+  for (const b of G.bugs) if (!(b.type === 'moth' && b.bonded) && hyp(b.x - p.x, b.y - p.y) < 34 + b.r) n++;
+  for (const c of G.clumps) if (hyp(c.x - p.x, c.y - p.y) < c.r + 16) n++;
+  for (const w of G.webs) if (hyp(w.x - p.x, w.y - p.y) < w.r + 4) { n++; break; }
+  return n >= 2;
+}
 function drawPlayer(t) {
-  const p = G.player;
-  for (let i = 0; i < p.trail.length; i++) { const q = p.trail[i]; if (q[2]) { ctx.fillStyle = `rgba(255,244,214,${i / p.trail.length * 0.4})`; ctx.beginPath(); ctx.arc(q[0], q[1], p.r, 0, TAU); ctx.fill(); } }
+  const p = G.player, C = PLAYER_CYAN;
+  if (p.dfx) { // dash trail: tapered bright streak from the dash start to where you are / landed
+    const a = p.dfx.on ? 1 : clamp(p.dfx.life / 0.5, 0, 1), { x0, y0, x1, y1 } = p.dfx;
+    if (hyp(x1 - x0, y1 - y0) > 2) {
+      const gr = ctx.createLinearGradient(x0, y0, x1, y1); gr.addColorStop(0, `rgba(${C},0)`); gr.addColorStop(1, `rgba(${C},${0.8 * a})`);
+      ctx.lineCap = 'round'; ctx.strokeStyle = gr; ctx.lineWidth = p.r * 1.8; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+      const g2 = ctx.createLinearGradient(x0, y0, x1, y1); g2.addColorStop(0, 'rgba(255,255,255,0)'); g2.addColorStop(1, `rgba(255,255,255,${0.9 * a})`);
+      ctx.strokeStyle = g2; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke(); ctx.lineCap = 'butt';
+      ctx.strokeStyle = `rgba(${C},${0.45 * a})`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x0, y0, 6, 0, TAU); ctx.stroke(); // where the dash started
+    }
+  }
   ctx.save(); ctx.translate(p.x, p.y);
-  const g = ctx.createRadialGradient(0, 0, 2, 0, 0, 22); g.addColorStop(0, 'rgba(255,244,214,0.5)'); g.addColorStop(1, 'rgba(255,244,214,0)');
-  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 22, 0, TAU); ctx.fill();
+  const plate = ctx.createRadialGradient(0, 0, 4, 0, 0, 26); plate.addColorStop(0, 'rgba(4,6,12,0.6)'); plate.addColorStop(1, 'rgba(4,6,12,0)'); // contrast plate (reads on pale webs / dust)
+  ctx.fillStyle = plate; ctx.beginPath(); ctx.arc(0, 0, 26, 0, TAU); ctx.fill();
+  ctx.strokeStyle = `rgba(${C},${0.42 + 0.14 * Math.sin(t * 3)})`; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.arc(0, 0, 22, 0, TAU); ctx.stroke(); // always-on ground halo
+  const g = ctx.createRadialGradient(0, 0, 2, 0, 0, 20); g.addColorStop(0, `rgba(${C},0.6)`); g.addColorStop(1, `rgba(${C},0)`); // cyan glow
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 20, 0, TAU); ctx.fill();
   ctx.rotate(Math.atan2(p.dy, p.dx));
-  ctx.fillStyle = p.ifr > 0 ? '#ffffff' : '#fff4d6'; ctx.beginPath(); ctx.arc(0, 0, p.r, 0, TAU); ctx.fill();
-  ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(3, -2.5, 1.5, 0, TAU); ctx.arc(3, 2.5, 1.5, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(0, 0, p.r, 0, TAU); ctx.fill();
+  ctx.strokeStyle = p.ifr > 0 ? '#ffffff' : `rgb(${C})`; ctx.lineWidth = 2.4; ctx.stroke(); // saturated cyan rim (white flash while invulnerable)
+  ctx.fillStyle = '#10202a'; ctx.beginPath(); ctx.arc(3, -2.5, 1.5, 0, TAU); ctx.arc(3, 2.5, 1.5, 0, TAU); ctx.fill();
   ctx.restore();
   const nsh = G.bugs.filter(o => o.type === 'moth' && o.bonded).length;
-  if (nsh > 0) { ctx.strokeStyle = `rgba(94,230,255,${0.35 + 0.2 * Math.sin(t * 6)})`; ctx.lineWidth = 1.5 + nsh * 0.7; ctx.beginPath(); ctx.arc(p.x, p.y, p.r + 10, 0, TAU); ctx.stroke(); }
+  if (nsh > 0) { ctx.strokeStyle = `rgba(25,230,255,${0.6 + 0.25 * Math.sin(t * 6)})`; ctx.lineWidth = 2 + nsh * 0.8; ctx.beginPath(); ctx.arc(p.x, p.y, p.r + 10, 0, TAU); ctx.stroke(); }
   // dash cooldown arc
   const f = 1 - clamp(p.dashCd / T.dashCd, 0, 1);
-  ctx.strokeStyle = f >= 1 ? 'rgba(120,255,160,0.6)' : 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2;
+  ctx.strokeStyle = f >= 1 ? 'rgba(120,255,160,0.7)' : 'rgba(255,255,255,0.4)'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(p.x, p.y, p.r + 5, -Math.PI / 2, -Math.PI / 2 + TAU * f); ctx.stroke();
+  if (p.ping) { // locator ping where the dash ended: brief white flash + expanding cyan ring
+    const k = 1 - clamp(p.ping.life / 0.6, 0, 1);
+    if (k < 0.25) { ctx.fillStyle = `rgba(255,255,255,${(0.25 - k) * 2.6})`; ctx.beginPath(); ctx.arc(p.ping.x, p.ping.y, 15, 0, TAU); ctx.fill(); }
+    ctx.strokeStyle = `rgba(${C},${0.95 * (1 - k)})`; ctx.lineWidth = 3 * (1 - k) + 1; ctx.beginPath(); ctx.arc(p.ping.x, p.ping.y, 10 + 48 * k, 0, TAU); ctx.stroke();
+  }
+  if (G.phase === 'play' && playerCrowded()) { // crowded: small bobbing locator arrow above the player
+    const yy = p.y - 30 - 3 * Math.sin(t * 6);
+    ctx.fillStyle = `rgb(${C})`; ctx.strokeStyle = '#04121a'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(p.x - 6, yy - 7); ctx.lineTo(p.x + 6, yy - 7); ctx.lineTo(p.x, yy + 1); ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
 }
 function drawWarning(t) {
   if (!G.warned || G.pulseT >= 0) return;
@@ -1036,7 +1080,7 @@ function drawWarning(t) {
   }
 }
 function drawStuckLabel() {
-  if (G.phase === 'play' && G.player.webbed) { ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(225,205,255,0.9)'; ctx.font = 'bold 12px system-ui,sans-serif'; ctx.fillText('STUCK -' + Math.round((G.player.webSlowNow || 0.5) * 100) + '%' + (G.player.webStr > 1 ? '  (layer ' + G.player.webStr + ')' : ''), G.player.x, G.player.y - 18); }
+  if (G.phase === 'play' && G.player.webbed) { ctx.textAlign = 'center'; ctx.font = 'bold 12px system-ui,sans-serif'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(4,6,12,0.85)'; ctx.fillStyle = 'rgba(235,220,255,0.95)'; const sl = ('STUCK -' + Math.round((G.player.webSlowNow || 0.5) * 100) + '%' + (G.player.webStr > 1 ? '  (layer ' + G.player.webStr + ')' : '')); ctx.strokeText(sl, G.player.x, G.player.y + 38); ctx.fillText(sl, G.player.x, G.player.y + 38); } // below the player, clear of its halo and locator arrow
 }
 const tw = (txt) => ((ctx.measureText(txt) || {}).width || 0);
 function drawHUD(t) { // screen space, CSS pixels: a slim strip above the arena (inside the safe area)
@@ -1117,9 +1161,10 @@ function render(t) {
   drawFilter(t);
   for (const b of G.bugs) drawBug(b, t);
   drawStingers(t);
-  if (G.phase !== 'dead' || G.deathT < 0.05) drawPlayer(t);
-  for (const q of G.parts) { ctx.globalAlpha = clamp(q.life / q.max, 0, 1); ctx.fillStyle = q.color; ctx.fillRect(q.x, q.y, q.size, q.size); }
+  { const pp = G.player; // particles: dimmed right around the player so it never drowns in confetti
+    for (const q of G.parts) { ctx.globalAlpha = clamp(q.life / q.max, 0, 1) * (hyp(q.x - pp.x, q.y - pp.y) < 30 ? 0.3 : 1); ctx.fillStyle = q.color; ctx.fillRect(q.x, q.y, q.size, q.size); } }
   ctx.globalAlpha = 1;
+  if (G.phase !== 'dead' || G.deathT < 0.05) drawPlayer(t); // the player (and its halo, dash trail, ping) is drawn on top of everything
   ctx.restore();
   // glass rim
   ctx.strokeStyle = '#3a4560'; ctx.lineWidth = 6; rrPath(AX0 - 3, AY0 - 3, AW + 6, AH + 6, CORNER + 3); ctx.stroke();
@@ -1265,6 +1310,11 @@ function setupTouch() {
 
 // ---------- in-game changelog (condensed from CHANGELOG.md; newest first). '## ' = version heading, '- ' = bullet ----------
 const CHANGELOG = [
+  '## v0.17.0 - 2026-10-04 (~21:50 PT)',
+  '- You stand out: the player is a white bug with a saturated cyan rim and glow (nothing else uses it), on a dark contrast plate with an always-on halo ring, and it is drawn on top of everything. Particles fade right around you, and a small cyan arrow points at you when you are crowded.',
+  '- Dashing leaves a bright trail from where you started to where you landed, then a white flash and an expanding ring at the landing spot.',
+  '- New palette: Roach, Wasp, Spider, Beetle and unrecruited Moths are light, bright pastels (peach, lemon, lilac, mint, sky) with crisp outlines, still easy to see and tell apart. You and recruited Moths are the saturated, glowing ones. Telegraphs (aim lines, red eyes, orange charge) stay bold.',
+  '- Webs go in one pass: walking through a web, or a bug breaking free of it, removes the whole web, whatever its layers (layers still slow you more and hold bugs longer). Only the webs actually crossed go. Each web counts once in Webs broken. Spiders are still immune and still stack layers. No other gameplay changes.',
   '## v0.16.0 - 2026-10-03 (~20:50 PT)',
   '- Share button on the start and game-over screens (bottom right): opens the share sheet on iPhone / app mode, otherwise copies the game link and shows "Link copied!", or shows the link in a box you can copy by hand. It always shares https://silvertibby.github.io/project-vacuum/. Cancelling the share sheet does nothing. No gameplay changes.',
   '## v0.15.0 - 2026-10-03 (~20:30 PT)',
