@@ -1,11 +1,15 @@
 // Project Vacuum leaderboard Worker.
 // Ranking = SURVIVAL TIME (longest first). Score and the other stats are stored for display only.
-//   GET  /board  -> top 10 [{name, time, score, lured, webs, pulses, empties, ver, at}] sorted by time desc
-//   POST /score  -> body JSON {name, time, score, lured, webs, ver[, pulses, empties]} -> {ok, rank, improved, top}
-// Storage: ONE KV key "board" holding up to 50 entries (longest time per name), plus short-lived "rl:<ip>" rate-limit keys.
-// Free-tier friendly: GET = 1 KV read; POST = 1-2 reads + 1 write (+1 write only if the time makes the stored 50).
+//   GET  /board        -> top 10 [{name, time, score, lured, webs, pulses, empties, ver, at[, rid]}] sorted by time desc (rid = replay id, Top 5 only)
+//   POST /score        -> body JSON {name, time, score, lured, webs, ver[, pulses, empties, replay]} -> {ok, rank, improved, replaySaved, top}
+//   GET  /replay/<rid> -> the stored replay JSON (v0.20: kept only while that entry is in the Top 5)
+// Storage: KV key "board" holding up to 50 entries (longest time per name), one "replay:<rid>" key per Top-5 entry that sent a replay,
+// plus short-lived "rl:<ip>" rate-limit keys. Replays of entries pushed to rank 6+ (or replaced by a longer run under that name) are deleted.
+// Free-tier friendly: GET /board = 1 KV read; POST = 1-2 reads + 1-2 writes (+1 replay write, + a delete per replay that drops out of the Top 5).
 
-const KEEP = 50, TOP = 10;
+const KEEP = 50, TOP = 10, REPLAY_TOP = 5;
+const MAX_BODY = 100 * 1024, REPLAY_MAX_D = 90000;   // base64 replay log cap (~66 KB binary; the game stops logging at 60 KB)
+const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/, RID_RE = /^[a-z0-9]{6,32}$/;
 const RL_WINDOW = 60, RL_MAX = 6;           // loose: at most 6 submissions per IP per ~minute (KV TTL minimum is 60 s)
 const NAME_RE = /^[A-Za-z0-9 _-]{1,16}$/;
 const VER_RE = /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/;
@@ -53,6 +57,17 @@ export function validate(b) {
   return { name, time: Math.round(b.time * 10) / 10, score, lured, webs, pulses, empties, ver, at: Date.now() };
 }
 
+// Optional replay blob from the game (see prototype/game.js 'replay recording'). Returns a clean object or null (a bad replay never rejects the score).
+export function validateReplay(r, time) {
+  if (!r || typeof r !== 'object' || Array.isArray(r) || r.v !== 1) return null;
+  const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+  if (!int(r.seed, 0, 4294967295) || !int(r.hz, 30, 240) || !int(r.w, 80, 10000) || !int(r.h, 80, 10000) || !int(r.tm, 0, 1) || !int(r.full, 0, 1)) return null;
+  if (!int(r.n, 1, 36000 * r.hz) || typeof r.d !== 'string' || !r.d.length || r.d.length > REPLAY_MAX_D || r.d.length % 4 || !B64_RE.test(r.d)) return null;
+  if (Math.abs(r.n / r.hz - time) > 1) return null;                   // the log must cover the submitted survival time
+  return { v: 1, ver: typeof r.ver === 'string' && VER_RE.test(r.ver) ? r.ver : '?', hz: r.hz, seed: r.seed, w: r.w, h: r.h, tm: r.tm, n: r.n, t: num(r.t, 0, 36001) ? r.t : +(r.n / r.hz).toFixed(2), full: r.full, d: r.d };
+}
+const newRid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8).padEnd(6, '0');
+
 async function readBoard(env) {
   try { const v = await env.LEADERBOARD.get('board', 'json'); return Array.isArray(v) ? v : []; } catch (e) { return []; }
 }
@@ -66,11 +81,18 @@ export default {
     if (url.pathname === '/board' && request.method === 'GET') {
       return json(sortBoard(await readBoard(env)).slice(0, TOP), 200, origin, { 'Cache-Control': 'public, max-age=5' });
     }
+    if (url.pathname.startsWith('/replay/') && request.method === 'GET') {
+      const rid = url.pathname.slice(8);
+      if (!RID_RE.test(rid)) return json({ ok: false, error: 'bad id' }, 400, origin);
+      const txt = await env.LEADERBOARD.get('replay:' + rid);
+      if (!txt) return json({ ok: false, error: 'no replay' }, 404, origin);
+      return new Response(txt, { status: 200, headers: Object.assign({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=300' }, cors(origin)) });
+    }
     if (url.pathname === '/score' && request.method === 'POST') {
       if (request.headers.get('Origin') && !origin) return json({ ok: false, error: 'origin not allowed' }, 403, null);
       const len = +(request.headers.get('Content-Length') || 0);
-      if (len > 1024) return json({ ok: false, error: 'too large' }, 413, origin);
-      let body; try { const txt = await request.text(); if (txt.length > 1024) return json({ ok: false, error: 'too large' }, 413, origin); body = JSON.parse(txt); }
+      if (len > MAX_BODY) return json({ ok: false, error: 'too large' }, 413, origin);
+      let body; try { const txt = await request.text(); if (txt.length > MAX_BODY) return json({ ok: false, error: 'too large' }, 413, origin); body = JSON.parse(txt); }
       catch (e) { return json({ ok: false, error: 'bad json' }, 400, origin); }
       const e = validate(body);
       if (typeof e === 'string') return json({ ok: false, error: e }, 400, origin);
@@ -81,6 +103,7 @@ export default {
       await env.LEADERBOARD.put(rk, String(n + 1), { expirationTtl: RL_WINDOW });
       // longest time per name (case-insensitive); keep the top 50
       let board = await readBoard(env);
+      const oldRids = board.map(x => x.rid).filter(Boolean);
       const key = e.name.toLowerCase(), prev = board.find(x => String(x.name).toLowerCase() === key);
       let changed = false;
       if (!prev) { board.push(e); changed = true; }
@@ -88,9 +111,18 @@ export default {
       sortBoard(board);
       if (board.length > KEEP) board = board.slice(0, KEEP);
       const stored = board.includes(e);
-      if (changed && stored) await env.LEADERBOARD.put('board', JSON.stringify(board));
+      let replaySaved = false;
+      if (changed && stored) {
+        // replays: only the Top 5 keep one (stored under its own key so GET /board stays light); ranks 6+ lose theirs
+        const rp = body.replay !== undefined && board.indexOf(e) < REPLAY_TOP ? validateReplay(body.replay, e.time) : null;
+        if (rp) { e.rid = newRid(); await env.LEADERBOARD.put('replay:' + e.rid, JSON.stringify(rp)); replaySaved = true; }
+        board.forEach((x, i) => { if (i >= REPLAY_TOP && x.rid) delete x.rid; });
+        await env.LEADERBOARD.put('board', JSON.stringify(board));
+        const keep = new Set(board.map(x => x.rid).filter(Boolean));
+        for (const rid of oldRids) if (!keep.has(rid)) { try { await env.LEADERBOARD.delete('replay:' + rid); } catch (err) {} }
+      }
       const top = board.slice(0, TOP), idx = top.indexOf(e);
-      return json({ ok: true, rank: idx >= 0 ? idx + 1 : null, improved: changed && stored, top }, 200, origin);
+      return json({ ok: true, rank: idx >= 0 ? idx + 1 : null, improved: changed && stored, replaySaved, top }, 200, origin);
     }
     return json({ ok: false, error: 'not found' }, 404, origin);
   },

@@ -1,10 +1,10 @@
 // Offline unit test for the Worker with an in-memory KV mock (no Cloudflare account needed): node test.mjs
-import worker, { validate } from './src/index.js';
+import worker, { validate, validateReplay } from './src/index.js';
 let fails = 0; const ok = (c, m) => { console.log(c ? 'PASS' : 'FAIL', m); if (!c) fails++; };
 const store = new Map();
 const env = { EXTRA_ORIGINS: '', LEADERBOARD: {
   async get(k, t) { const v = store.has(k) ? store.get(k) : null; return v !== null && t === 'json' ? JSON.parse(v) : v; },
-  async put(k, v) { store.set(k, v); } } };
+  async put(k, v) { store.set(k, v); }, async delete(k) { store.delete(k); } } };
 const O = 'https://silvertibby.github.io';
 let ipN = 0;
 const req = (method, path, body, headers = {}) => new Request('https://lb.example.workers.dev' + path, { method, body: body === undefined ? undefined : (typeof body === 'string' ? body : JSON.stringify(body)),
@@ -54,7 +54,7 @@ const bad = [['empty name', good('', 50)], ['long name', good('x'.repeat(17), 50
   ['huge time', good('A', 50, { time: 99999 })], ['negative lured', good('A', 50, { lured: -1 })], ['implausible stats', good('A', 5, { webs: 99999 })]];
 for (const [n, b] of bad) { ({ r, j } = await call('POST', '/score', b)); ok(r.status === 400 && j && j.ok === false, 'rejects ' + n + ' (' + (j && j.error) + ')'); }
 ({ r } = await call('POST', '/score', '{not json')); ok(r.status === 400, 'rejects bad JSON');
-({ r } = await call('POST', '/score', JSON.stringify(good('A', 50)) + ' '.repeat(2000))); ok(r.status === 413, 'rejects oversized body');
+({ r } = await call('POST', '/score', JSON.stringify(good('A', 50)) + ' '.repeat(110 * 1024))); ok(r.status === 413, 'rejects oversized body (> 100 KB)');
 ({ r } = await call('POST', '/score', [1, 2])); ok(r.status === 400, 'rejects arrays');
 ({ r } = await call('GET', '/nope')); ok(r.status === 404, '404 for unknown paths');
 // rate limit: same IP
@@ -62,4 +62,43 @@ let codes = []; for (let i = 0; i < 8; i++) { const rr = await worker.fetch(new 
 ok(codes.slice(0, 6).every(c => c === 200) && codes[6] === 429 && codes[7] === 429, 'rate limit: 6 per IP per minute, then 429 (' + codes.join(',') + ')');
 ok(typeof validate({ name: 'Ok Name_1-2', score: 600, time: 50, lured: 0, webs: 0, ver: '0.18.0' }) === 'object', 'validate accepts a normal run without pulses');
 ok(validate({ name: 'NoScore', time: 42.36 }).time === 42.4 && validate({ name: 'NoScore', time: 42.36 }).score === null, 'validate: time-only run OK (time rounded to 0.1 s, score null)');
+
+// ---- v0.20 replays: kept only for the Top 5 (separate KV key per entry), GET /board carries ids only ----
+store.clear();
+const rp = (time, extra = {}) => Object.assign({ v: 1, ver: '0.20.0', hz: 60, seed: 123456789, w: 760, h: 540, tm: 0, n: Math.round(time * 60), t: time, full: 1, d: Buffer.from('replay-log-' + time).toString('base64') }, extra);
+const withR = (name, time, extra = {}) => good(name, time, { ver: '0.20.0', replay: rp(time, extra) });
+const rKeys = () => [...store.keys()].filter(k => k.startsWith('replay:'));
+({ r, j } = await call('POST', '/score', withR('R1', 100)));
+const rid1 = j.top[0].rid;
+ok(j.ok && j.rank === 1 && j.replaySaved === true && typeof rid1 === 'string' && store.has('replay:' + rid1), 'replay saved for a Top-5 run (rid ' + rid1 + ')');
+ok(!('replay' in j.top[0]) && !JSON.parse(store.get('board'))[0].replay && !store.get('board').includes('replay-log'), 'board stores only the rid, not the replay body');
+({ r, j } = await call('GET', '/replay/' + rid1));
+ok(r.status === 200 && j.seed === 123456789 && j.n === 6000 && j.d === rp(100).d && j.v === 1, 'GET /replay/<rid> returns the stored replay');
+({ r, j } = await call('GET', '/board')); ok(j[0].rid === rid1 && !('d' in j[0]), 'GET /board lists the rid (no replay body)');
+({ r } = await call('GET', '/replay/zzzzzzzzzz')); ok(r.status === 404, 'unknown replay id -> 404');
+({ r } = await call('GET', '/replay/..%2Fboard')); ok(r.status === 400, 'malformed replay id -> 400');
+for (let i = 2; i <= 5; i++) await call('POST', '/score', withR('R' + i, 100 + i * 10));
+ok(rKeys().length === 5 && JSON.parse(store.get('board')).filter(x => x.rid).length === 5, '5 Top-5 runs -> 5 replay keys');
+({ j } = await call('POST', '/score', withR('R6', 500)));
+let bd = JSON.parse(store.get('board')); const r1 = bd.find(x => x.name === 'R1');
+ok(j.rank === 1 && j.replaySaved && bd.indexOf(r1) === 5 && !r1.rid && !store.has('replay:' + rid1) && rKeys().length === 5, 'run pushed to rank 6 loses its replay (key deleted, rid removed)');
+({ j } = await call('POST', '/score', withR('R7', 50)));
+ok(j.ok && j.rank === 7 && j.replaySaved === false && !j.top[6].rid && rKeys().length === 5, 'a run that lands at rank 7 is stored without a replay');
+const oldRid = JSON.parse(store.get('board')).find(x => x.name === 'R3').rid;
+({ j } = await call('POST', '/score', withR('r3', 600)));
+bd = JSON.parse(store.get('board'));
+ok(j.rank === 1 && j.replaySaved && bd[0].rid && bd[0].rid !== oldRid && !store.has('replay:' + oldRid) && rKeys().length === 5, 'longer run under the same name replaces its replay (old key deleted)');
+({ j } = await call('POST', '/score', withR('R3', 590)));
+ok(j.ok && j.improved === false && j.replaySaved === false && rKeys().length === 5, 'shorter run under an existing name: replay ignored');
+({ j } = await call('POST', '/score', good('NoRp', 700)));
+ok(j.ok && j.rank === 1 && j.replaySaved === false && !j.top[0].rid && rKeys().length === 4, 'Top-1 run without a replay is fine (and pushes one replay out)');
+for (const [n, x, idx] of [['bad base64', { d: 'not base64!!' }], ['n vs time mismatch', { n: 60 }], ['wrong version', { v: 2 }], ['oversized log', { d: 'A'.repeat(90004) }], ['bad seed', { seed: -1 }]].map((v, i) => [v[0], v[1], i])) {
+  ({ r, j } = await call('POST', '/score', withR('Bad' + idx, 800 + idx * 5, x)));
+  ok(r.status === 200 && j.ok && j.rank === 1 && j.replaySaved === false && !j.top[0].rid, 'invalid replay (' + n + ') dropped, score still accepted');
+}
+ok(rKeys().length === JSON.parse(store.get('board')).slice(0, 5).filter(x => x.rid).length && JSON.parse(store.get('board')).slice(5).every(x => !x.rid), 'invariant: replay keys == rids in the Top 5, none below');
+({ r, j } = await call('POST', '/score', withR('Big', 900, { d: 'A'.repeat(88000), n: 54000 })));
+ok(r.status === 200 && j.replaySaved === true, 'an ~88 KB replay body is accepted');
+ok(validateReplay(rp(10), 10) && validateReplay(rp(10), 12) === null && validateReplay(null, 1) === null, 'validateReplay basics');
+
 console.log(fails ? 'FAILURES: ' + fails : 'ALL PASS'); process.exit(fails ? 1 : 0);

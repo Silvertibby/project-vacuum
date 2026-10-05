@@ -22,4 +22,4 @@ Real-time, solo battle-royale survival inside a handheld vacuum canister. You're
 
 ## Shared leaderboard (optional)
 
-`leaderboard/` is a tiny Cloudflare Worker + KV that keeps a Top 10 ranked by survival time (free tier). The title screen has a High Scores button; on game over a clean High Scores panel replaces the results screen (name + submit). See `leaderboard/README.md` for the deploy steps, then set `LEADERBOARD_URL` at the top of `prototype/game.js` to the Worker URL and rebuild. Leave it empty for offline play.
+`leaderboard/` is a tiny Cloudflare Worker + KV that keeps a Top 10 ranked by survival time (free tier). The title screen has a High Scores button; on game over a clean High Scores panel replaces the results screen (name + submit). See `leaderboard/README.md` for the deploy steps, then set `LEADERBOARD_URL` at the top of `prototype/game.js` to the Worker URL and rebuild. Leave it empty for offline play. Since v0.20 every run is recorded (seed + 60 Hz input log, fully deterministic) and Top-5 entries keep that replay on the Worker for a future Watch mode (no playback UI yet).

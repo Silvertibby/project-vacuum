@@ -5,6 +5,10 @@ The in-game version is the `VERSION` constant in `prototype/game.js` (tappable '
 
 **Play it:** https://silvertibby.github.io/project-vacuum/ (repo: https://github.com/Silvertibby/project-vacuum).
 
+## [0.20.0] - 2026-10-05
+### Added
+- Top runs save a replay for later.
+
 ## [0.19.1] - 2026-10-05
 ### Changed
 - Changelog trimmed to short player-facing notes (no balance / timing numbers).

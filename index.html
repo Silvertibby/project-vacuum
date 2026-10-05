@@ -35,7 +35,7 @@
 // Project Vacuum - prototype. Plain canvas, no build step. Open index.html.
 (() => {
 'use strict';
-const VERSION = '0.19.1'; // keep in sync with CHANGELOG.md
+const VERSION = '0.20.0'; // keep in sync with CHANGELOG.md
 // Shared online leaderboard (Cloudflare Worker, see leaderboard/README.md). '' = offline: local best only, no network calls.
 // Set to the Worker URL, e.g. 'https://project-vacuum-leaderboard.<subdomain>.workers.dev' (no trailing slash), to show High Scores on title + game over.
 const LEADERBOARD_URL = 'https://project-vacuum-leaderboard.silvertibby.workers.dev';
@@ -123,7 +123,19 @@ const TYPES = {
 };
 
 // ---------- helpers ----------
-const rnd = (a = 1, b) => b === undefined ? Math.random() * a : a + Math.random() * (b - a);
+// v0.20 DETERMINISM: every gameplay random number comes from ONE seeded PRNG (mulberry32), reseeded by newGame(). The simulation runs at a fixed
+// 60 Hz tick (see frame()), so seed + the per-tick input log (see 'replay recording' below) reproduces a run exactly (same browser engine).
+// rnd() = gameplay (seeded; only call it from the simulation: newGame / step). vrnd() = cosmetic only (render shake, background dust): Math.random.
+let rngS = 1, simOn = false, rngOutside = 0;          // rngOutside: test counter, gameplay rnd() calls made outside newGame/step (must stay 0)
+function seedRng(seed) { rngS = seed >>> 0; }
+function rand01() {
+  if (!simOn) rngOutside++;
+  let t = (rngS = (rngS + 0x6D2B79F5) | 0); t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+function newSeed() { try { const u = new Uint32Array(1); crypto.getRandomValues(u); return u[0] >>> 0; } catch (e) {} return Math.floor(Math.random() * 4294967296) >>> 0; }
+const rnd = (a = 1, b) => b === undefined ? rand01() * a : a + rand01() * (b - a);
+const vrnd = (a = 1, b) => b === undefined ? Math.random() * a : a + Math.random() * (b - a);
 const hyp = Math.hypot;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const sstep = x => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
@@ -202,7 +214,7 @@ function computeLayout() {
   const sx = ax + (aw - nW * wScale) / 2, sy = ay + (ah - nH * wScale) / 2;
   arenaScr = { x: sx, y: sy, w: nW * wScale, h: nH * wScale };
   WX0 = (CX - nW / 2) - sx / wScale; WY0 = (CY - nH / 2) - sy / wScale;
-  if (nW !== AW || nH !== AH) { setArena(nW, nH); if (typeof G !== 'undefined' && G) refitArena(); }
+  if (nW !== AW || nH !== AH) { setArena(nW, nH); if (typeof G !== 'undefined' && G) { recArena(); refitArena(); } }
 }
 function resizeView() {
   if (typeof canvas.getBoundingClientRect !== 'function') return;
@@ -254,10 +266,14 @@ function refitArena() { // the arena changed size (rotation / resize): pull ever
 let G;
 const keys = {};
 let bgDust = [];
-function makeDust() { bgDust = []; const n = Math.round(AW * AH / 3500); for (let i = 0; i < n; i++) bgDust.push([rnd(), rnd(), rnd(0.6, 2)]); } // fractions of the arena rect
+function makeDust() { bgDust = []; const n = Math.round(AW * AH / 3500); for (let i = 0; i < n; i++) bgDust.push([vrnd(), vrnd(), vrnd(0.6, 2)]); } // fractions of the arena rect
 
-function newGame(phase) {
+function newGame(phase, seed) {
+  simOn = true;
+  seed = seed === undefined ? newSeed() : seed >>> 0;
+  seedRng(seed); nextId = 1;
   G = {
+    seed, tick: 0, tk: 0, rec: null, replay: null, inputSrc: null, // replay: seed + tick counter; inputSrc(tick) -> input code (headless playback/tests only)
     phase: phase || 'ready', // ready | play | dead
     t: 0, pulseN: 0, nextPulseAt: T.firstPulse, trickleT: 12, debrisT: 8,
     pulseT: -1, pulseDur: 0, warned: false, spawnPlan: [],
@@ -280,7 +296,91 @@ function newGame(phase) {
   place('roach', 150, 260);
   for (let i = 0; i < 2; i++) { place('wasp', 100, 250); place('spider', 100, 250); place('moth', 150, 250); } place('beetle', 100, 220);
   for (let i = 0; i < 7; i++) { for (let k = 0; k < 30; k++) { const a = rnd(TAU), r = rnd(70, 240), x = CX + Math.cos(a) * r, y = CY + Math.sin(a) * r; if (inArena(x, y, 30) && hyp(x - p.x, y - p.y) > 60) { addClump(a, r); break; } } }
+  recStart();
+  simOn = false;
   return G;
+}
+
+// ---------- replay recording (v0.20; no playback UI yet) ----------
+// A run = seed + arena size + touch flag at newGame() + a compact binary event log, base64'd into G.replay at death (sent with the score).
+// Event = varint(tick delta) + op byte [+ varint args]:
+//   op 0x00-0x3F  input state from this tick on (logged only when it changes):
+//                 bit5 = 0: bits0-3 key mask (1 up, 2 down, 4 left, 8 right; opposite keys cancel)   bit5 = 1: analog stick, bits0-3 = magnitude 1-15 (/15),
+//                 + varint angle 0-127 (x 2pi/128)                                                    bit4 = dash held
+//   0x40 arena resized (+ varint w, h; applied before that tick)   0x41 / 0x42 touch layout off / on (moves the EMPTY corner)
+//   0x43 EMPTY pickup triggered (marker)                            0x44 checksum (+ varint u32 simHash() of the state BEFORE that tick, every 2 s)
+// Capped at REPLAY_MAX raw bytes (~80 KB base64); a longer log stops recording and the replay is marked full: 0.
+const SIM_HZ = 60, SIM_DT = 1 / SIM_HZ, REPLAY_MAX = 60 * 1024, REPLAY_CHK = 120;
+function liveInputCode(dt) { // keyboard first (as before), then the touch stick; quantized so the log reproduces exactly what the sim used
+  touch.dashBuf = Math.max(0, touch.dashBuf - dt);
+  const dash = (keys.Space || touch.dashHeld || touch.dashBuf > 0) ? 16 : 0;
+  const ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0), iy = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+  if (ix || iy) return dash | (iy < 0 ? 1 : iy > 0 ? 2 : 0) | (ix < 0 ? 4 : ix > 0 ? 8 : 0);
+  if (touch.joyOn) { const m = hyp(touch.ax, touch.ay); if (m > 0) return dash | 32 | clamp(Math.round(Math.min(1, m) * 15), 1, 15) | ((Math.round(Math.atan2(touch.ay, touch.ax) / TAU * 128) & 127) << 8); }
+  return dash;
+}
+function decodeInput(c) { // -> [ix, iy, ux, uy]: move vector (|v| <= 1) and unit facing (0,0 when idle)
+  if (c & 32) { const a = ((c >> 8) & 127) / 128 * TAU, m = (c & 15) / 15, ux = Math.cos(a), uy = Math.sin(a); return [ux * m, uy * m, ux, uy]; }
+  const ix = (c & 8 ? 1 : 0) - (c & 4 ? 1 : 0), iy = (c & 2 ? 1 : 0) - (c & 1 ? 1 : 0), l = hyp(ix, iy);
+  return l ? [ix / l, iy / l, ix / l, iy / l] : [0, 0, 0, 0];
+}
+function simHash() { // cheap state fingerprint for desync checks: PRNG state, player position, counts
+  const p = G.player; let h = (rngS ^ 0x9e3779b9) >>> 0;
+  for (const v of [Math.round(p.x * 64), Math.round(p.y * 64), G.bugs.length, G.clumps.length, G.webs.length, G.lureKills, G.pulseN]) h = Math.imul(h ^ (v | 0), 16777619) >>> 0;
+  return h;
+}
+function recStart() { G.rec = { seed: G.seed, w: AW, h: AH, tm: touchMode ? 1 : 0, tmNow: touchMode ? 1 : 0, buf: new Uint8Array(8192), len: 0, at: 0, last: -1, full: true, off: false }; }
+function recPut(R, b) { if (R.len >= R.buf.length) { const nb = new Uint8Array(Math.min(REPLAY_MAX, R.buf.length * 2)); nb.set(R.buf); R.buf = nb; } R.buf[R.len++] = b; }
+function recVar(R, v) { v = v >>> 0; while (v >= 128) { recPut(R, (v & 127) | 128); v >>>= 7; } recPut(R, v); }
+function recEv(tick, op, args) {
+  const R = G && G.rec; if (!R || R.off) return;
+  if (R.len + 16 > REPLAY_MAX) { R.off = true; R.full = false; return; }
+  recVar(R, tick - R.at); R.at = tick; recPut(R, op); if (args) for (const v of args) recVar(R, v);
+}
+function recInput(tick, code) { const R = G.rec; if (!R || code === R.last) return; R.last = code; recEv(tick, code & 63, code & 32 ? [(code >> 8) & 127] : null); }
+function recTouch(tick) { const R = G.rec, v = touchMode ? 1 : 0; if (R && v !== R.tmNow) { R.tmNow = v; recEv(tick, v ? 0x42 : 0x41); } }
+function recArena() { if (typeof G !== 'undefined' && G && G.rec) recEv(G.tick, 0x40, [AW, AH]); }
+function recFinish() {
+  const R = G.rec; if (!R) return null;
+  R.off = true; G.rec = null;
+  let bin = ''; for (let i = 0; i < R.len; i += 8192) bin += String.fromCharCode.apply(null, R.buf.subarray(i, Math.min(R.len, i + 8192)));
+  return { v: 1, ver: VERSION, hz: SIM_HZ, seed: R.seed, w: R.w, h: R.h, tm: R.tm, n: G.tick, t: +G.t.toFixed(2), full: R.full ? 1 : 0, d: btoa(bin) };
+}
+function replayDecode(rp) { // -> { inputs: [[tick, code]], env: [[tick, 'arena', w, h] | [tick, 'tm', 0|1]], marks: [[tick, 'empty']], chk: [[tick, hash]] } or null
+  try {
+    const s = atob(rp.d), b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i);
+    let i = 0, t = 0; const rv = () => { let v = 0, sh = 0, x; do { if (i >= b.length) throw new Error('eof'); x = b[i++]; v += (x & 127) * Math.pow(2, sh); sh += 7; } while (x & 128); return v; };
+    const out = { inputs: [], env: [], marks: [], chk: [] };
+    while (i < b.length) {
+      t += rv(); if (i >= b.length) throw new Error('eof'); const op = b[i++];
+      if (op < 64) out.inputs.push([t, op & 32 ? op | (rv() << 8) : op]);
+      else if (op === 0x40) { const w = rv(), h = rv(); out.env.push([t, 'arena', w, h]); }
+      else if (op === 0x41 || op === 0x42) out.env.push([t, 'tm', op - 0x41]);
+      else if (op === 0x43) out.marks.push([t, 'empty']);
+      else if (op === 0x44) out.chk.push([t, rv()]);
+      else throw new Error('op ' + op);
+    }
+    return out;
+  } catch (e) { return null; }
+}
+// Headless re-simulation (tests / future Watch): replays seed + log and compares every checksum. Clobbers the current game (ends on the title screen).
+function replayCheck(rp, keepGame) {
+  const ev = replayDecode(rp); if (!ev) return { ok: false, err: 'decode' };
+  const saved = { w: AW, h: AH, tm: touchMode };
+  setArena(rp.w, rp.h); touchMode = !!rp.tm;
+  newGame('play', rp.seed); G.rec = null;
+  let ii = 0, ei = 0, ci = 0, code = 0, bad = -1, checked = 0;
+  G.inputSrc = tk => { while (ii < ev.inputs.length && ev.inputs[ii][0] <= tk) code = ev.inputs[ii++][1]; return code; };
+  const verify = t => { while (ci < ev.chk.length && ev.chk[ci][0] <= t) { if (ev.chk[ci][0] === t) { checked++; if (simHash() !== ev.chk[ci][1] && bad < 0) bad = t; } ci++; } };
+  for (let t = 0; t < rp.n && G.phase === 'play'; t++) {
+    verify(t);
+    while (ei < ev.env.length && ev.env[ei][0] <= t) { const e = ev.env[ei++]; if (e[1] === 'arena') { setArena(e[2], e[3]); refitArena(); } else touchMode = !!e[2]; }
+    step(SIM_DT);
+  }
+  if (G.phase === 'play') verify(G.tick);
+  const res = { ok: bad < 0 && G.tick === rp.n && (G.phase === 'dead' || !rp.full), ticks: G.tick, n: rp.n, t: +G.t.toFixed(2), dead: G.phase === 'dead', cause: G.cause, checked, firstBad: bad, score: G.score };
+  if (!keepGame) { setArena(saved.w, saved.h); touchMode = saved.tm; newGame('ready'); }
+  return res;
 }
 
 // hp ramp by SPAWN time: early bugs are fragile (friendly fire kills them), late bugs are tougher AND hit harder (dmgMult)
@@ -439,7 +539,7 @@ function tryPickup(dt) {
   P.lockMsgT = Math.max(0, P.lockMsgT - dt);
   const [x, y] = pickPos(); if (hyp(p.x - x, p.y - y) >= T.empty.pickR + p.r + T.empty.pickTouch) return false;
   if (emptyLocked()) { if (P.lockMsgT <= 0 && !G.empty) { floatText(x, y - 24, G.pulseT >= 0 || G.warned ? 'EMPTY: wait for the pulse to end' : 'EMPTY: not yet', '#b8c4dc'); P.lockMsgT = 1.4; } return false; }
-  G.emptyCharges--; G.emptyUsed++;
+  G.emptyCharges--; G.emptyUsed++; if (G.rec) recEv(G.tk, 0x43);
   burst(x, y, '#7dff9a', 22, 170, 0.7); floatText(x, y - 24, 'EMPTY TRIGGERED!', '#7dff9a'); beep(660, 0.12, 'square', 0.05);
   startEmpty();
   return true;
@@ -557,7 +657,7 @@ function scatterBlast() {
     const out = Math.atan2(cy - CY, cx - CX);
     let dx = 0, dy = 0, eat = false;
     const K = T.clump;
-    if (m.length === 1 && m[0].dirt && hyp(cx - CX, cy - CY) < rz + K.eatNear && Math.random() < K.eatChance) { // suction: debris right next to the filter is dragged into the core and destroyed
+    if (m.length === 1 && m[0].dirt && hyp(cx - CX, cy - CY) < rz + K.eatNear && rnd() < K.eatChance) { // suction: debris right next to the filter is dragged into the core and destroyed
       dx = CX - cx; dy = CY - cy; eat = true;
     } else for (let k = 0; k < S.tries; k++) { // mostly outward/sideways drifts; later tries widen the angle and shorten the slide
       const a = k < S.tries / 2 ? out + rnd(-S.spread, S.spread) : rnd(TAU), dist = rnd(S.dMin, S.dMax) * Math.max(0.35, 1 - k * 0.07);
@@ -881,13 +981,12 @@ function absorbHit(attacker) {
 // ---------- player ----------
 function updatePlayer(dt) {
   const p = G.player;
-  let ix = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
-  let iy = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
-  const il = hyp(ix, iy); if (il > 0) { ix /= il; iy /= il; p.dx = ix; p.dy = iy; }
-  else if (touch.joyOn) { const m = hyp(touch.ax, touch.ay); if (m > 0) { ix = touch.ax; iy = touch.ay; p.dx = ix / m; p.dy = iy / m; } } // analog stick (magnitude <= 1)
-  touch.dashBuf = Math.max(0, touch.dashBuf - dt);
+  // v0.20: the sim only sees a quantized input code (keys / stick / dash) -- the same code goes into the replay log
+  const code = G.inputSrc ? G.inputSrc(G.tk) : liveInputCode(dt);
+  if (G.rec) recInput(G.tk, code);
+  const [ix, iy, ux, uy] = decodeInput(code); if (ux || uy) { p.dx = ux; p.dy = uy; }
   p.dashCd -= dt; p.ifr -= dt;
-  if ((keys.Space || touch.dashHeld || touch.dashBuf > 0) && p.dashCd <= 0 && p.dashT <= 0) {
+  if ((code & 16) && p.dashCd <= 0 && p.dashT <= 0) {
     p.dashT = T.dashTime; p.dashCd = T.dashCd; p.ifr = T.dashTime + 0.06; beep(520, 0.08, 'triangle', 0.04);
     burst(p.x, p.y, '#fff4d6', 6, 60, 0.3);
     p.dfx = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, on: true, life: 0.5 }; // visual only: dash trail start -> end, then a locator ping where you land
@@ -920,6 +1019,7 @@ function updatePlayer(dt) {
 function die(reason) {
   if (G.phase !== 'play') return;
   G.phase = 'dead'; G.cause = reason; G.deathT = 0;
+  G.replay = recFinish();
   G.newBest = G.t > best; if (G.newBest) { best = G.t; saveBest(best); }
   G.score = calcScore(); G.newBestScore = G.score > bestScore; if (G.newBestScore) bestScore = G.score;
   G.record = { version: VERSION, time: +G.t.toFixed(1), pulses: G.pulseN, luredKills: G.lureKills, websBroken: websBroken(), websByPlayer: G.websPlayer, websByBugs: G.websBugs, bugsKilled: G.bugsKilled, lostToFilter: G.sucked, empties: G.empties, emptyUsed: G.emptyUsed, emptiedBugs: G.emptiedBugs, score: G.score, cause: reason, ts: Date.now() };
@@ -929,7 +1029,8 @@ function die(reason) {
 }
 
 // ---------- main update ----------
-function step(dt) {
+function step(dt) { simOn = true; try { stepSim(dt); } finally { simOn = false; } }
+function stepSim(dt) {
   // cosmetic updates always run
   for (const q of G.parts) { q.x += q.vx * dt; q.y += q.vy * dt; q.vx *= 0.96; q.vy *= 0.96; q.life -= dt; }
   G.parts = G.parts.filter(q => q.life > 0);
@@ -940,6 +1041,8 @@ function step(dt) {
   if (G.phase === 'dead') { G.deathT += dt; return; }
 
   G.t += dt;
+  G.tk = G.tick++;               // this tick's index (inputs / env events are logged against it)
+  if (G.rec) recTouch(G.tk);
   const p = G.player;
 
   // pulse scheduler
@@ -995,6 +1098,7 @@ function step(dt) {
     s.r -= (40 + T.playerPull(Math.max(1, G.pulseN)) * 1.2 * env) * dt;
     if (s.r < G.filterR + 4) { s.a = rnd(TAU); s.r = Math.max(G.filterR + 10, edgeR(s.a) - rnd(0, 30)); s.l = rnd(10, 30); }
   }
+  if (G.rec && G.phase === 'play' && G.tick % REPLAY_CHK === 0) recEv(G.tick, 0x44, [simHash()]);
 }
 
 // ---------- render ----------
@@ -1406,7 +1510,7 @@ function render(t) {
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, cssW, cssH); ctx.fillStyle = '#07080c'; ctx.fillRect(0, 0, cssW, cssH);
   ctx.setTransform(dpr * wScale, 0, 0, dpr * wScale, -WX0 * dpr * wScale, -WY0 * dpr * wScale); // WORLD view: the rectangular arena fills the screen below the HUD
-  if (G.shake > 0) ctx.translate(rnd(-G.shake, G.shake) * 0.5, rnd(-G.shake, G.shake) * 0.5);
+  if (G.shake > 0) ctx.translate(vrnd(-G.shake, G.shake) * 0.5, vrnd(-G.shake, G.shake) * 0.5);
   drawCanister(t);
   ctx.save(); rrPath(AX0, AY0, AW, AH, CORNER); ctx.clip();
   drawStreaks();
@@ -1581,6 +1685,8 @@ function setupTouch() {
 
 // ---------- in-game changelog (condensed from CHANGELOG.md; newest first). '## ' = version heading, '- ' = bullet ----------
 const CHANGELOG = [
+  '## v0.20.0 - 2026-10-05',
+  '- Top runs save a replay for later.',
   '## v0.19.1 - 2026-10-05',
   '- Changelog trimmed to short player-facing notes (no balance numbers).',
   '## v0.19.0 - 2026-10-04',
@@ -1799,6 +1905,7 @@ function lbSubmit() {
   if (!LB_NAME_RE.test(name)) { lb.status = 'Name: 1–16 letters, digits, space, _ or -'; lbRender(); return; }
   try { localStorage.setItem('vacuum_name', name); } catch (e) {}
   const g = G, body = { name, score: g.score, time: +g.t.toFixed(1), lured: g.lureKills, webs: websBroken(), ver: VERSION, pulses: g.pulseN, empties: g.empties || 0 };
+  if (g.replay && g.replay.d && g.replay.d.length <= 90000) body.replay = g.replay; // the Worker keeps it only while the run is in the Top 5
   lb.busy = true; lb.status = 'Submitting...'; lbRender();
   lbFetch('/score', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(body) }).then(({ status, j }) => {
     lb.busy = false; if (G !== g) return;
@@ -2052,18 +2159,21 @@ makeDust();
 newGame('ready');
 setupTouch();
 resizeView();
-let last = performance.now(), clock = 0;
+let last = performance.now(), clock = 0, acc = 0;
+// v0.20: the simulation runs at a FIXED 60 Hz tick (deterministic replays). The accumulator tolerates +-4 ms of frame jitter so a 60 Hz display
+// gets exactly one tick per frame; at most 4 ticks per frame (a long stall slows the game down instead of jumping ahead).
 function frame(now) {
   if (typeof canvas.getBoundingClientRect === 'function') { const r = canvas.getBoundingClientRect(); if (Math.abs(r.width - cssW) > 0.5 || Math.abs(r.height - cssH) > 0.5 || dpr !== Math.min(3, window.devicePixelRatio || 1)) resizeView(); }
-  const dt = Math.min(0.033, (now - last) / 1000); last = now; clock += dt;
-  if (!paused) step(dt);
+  let el = Math.min(0.1, Math.max(0, (now - last) / 1000)); last = now; clock += el;
+  if (Math.abs(el - SIM_DT) < 0.002) el = SIM_DT; // 59.94 / 60 Hz displays and coarse timers: exactly one tick per frame (no slow drift into double ticks)
+  if (!paused) { acc += el; let n = 0; while (acc >= SIM_DT * 0.75 && n < 4) { step(SIM_DT); acc -= SIM_DT; n++; } if (n === 4 && acc > 0) acc = 0; } else acc = 0;
   render(clock);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
 // test hook (used by headless checks)
-window.__vac = { VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, lb, lbPlace, lbSubmit, lbToggleTitle, inSafe, setLeaderboardURL(u) { lb.url = String(u || '').replace(/\/+$/, ''); }, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb, pullEnv, pullVec, bugSuck, avoidVec, startEmpty, doEmpty, pickSafeSpot, updateEmpty, pickPos, emptyLocked, emptyState, tryPickup, startPulse, planRefill, makeBug, killBug };
+window.__vac = { replayDecode, replayCheck, decodeInput, simHash, seedRng, get rngOutside() { return rngOutside; }, SIM_DT, REPLAY_MAX, VERSION, CHANGELOG, clog, openClog, closeClog, get verBtn() { return verBtn; }, get shareBtn() { return share.btn; }, share, doShare, SHARE, lb, lbPlace, lbSubmit, lbToggleTitle, inSafe, setLeaderboardURL(u) { lb.url = String(u || '').replace(/\/+$/, ''); }, clogScrollBy, touch, get view() { return { VX0, VY0, VW, VH, viewScale, cssW, cssH, dpr, safe, touchMode }; }, get G() { return G; }, step, keys, newGame, startRun, T, TYPES, CX, CY, render, get A() { return { x0: AX0, y0: AY0, x1: AX1, y1: AY1, w: AW, h: AH, corner: CORNER }; }, get R() { return Math.min(AW, AH) / 2; }, inArena, edgeDist, spawnY, hpMult, wearClump, popClump, get wview() { return { WX0, WY0, wScale, arenaScr }; }, setViewport(w, h, sf) { cssW = w; cssH = h; if (sf) safe = sf; computeLayout(); }, get best() { return best; }, get bestScore() { return bestScore; }, websBroken, calcScore, weakenWebs, addWeb, pullEnv, pullVec, bugSuck, avoidVec, startEmpty, doEmpty, pickSafeSpot, updateEmpty, pickPos, emptyLocked, emptyState, tryPickup, startPulse, planRefill, makeBug, killBug };
 })();
 
 </script>
